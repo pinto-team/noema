@@ -1,0 +1,22 @@
+# NOEMA • tests/regression/arith-2plus2.yaml
+# هدف: اطمینان از اینکه پرسش ساده‌ی محاسباتی «2+2» → خروجی «4» می‌دهد.
+
+meta:
+  id: "arith-2plus2"
+  desc: "ورودی ریاضی ساده باید درست محاسبه شود."
+  tags: ["compute", "calc", "smoke"]
+
+input:
+  user_text: "2+2؟"
+
+plan_hint:
+  # اگر لایه‌ی lang/parse اجرا شود، باید intent=compute باشد.
+  intent: "compute"
+
+expect:
+  intent: "compute"
+  text_contains: ["4"]
+  not_contains: ["__builtins__", "خطای عبارت", "invalid"]
+  # اگر runner بتواند outcome را بخواند:
+  outcome_equals:
+    result: "4"

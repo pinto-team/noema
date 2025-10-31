@@ -1,0 +1,142 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="AutoImportSettings">
+    <option name="autoReloadType" value="SELECTIVE" />
+  </component>
+  <component name="ChangeListManager">
+    <list default="true" id="4ee551c1-7352-4cbd-a52e-350e9bd721bc" name="Changes" comment="">
+      <change afterPath="$PROJECT_DIR$/.idea/inspectionProfiles/Project_Default.xml" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/.idea/inspectionProfiles/profiles_settings.xml" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/.idea/modules.xml" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/.idea/noema.iml" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/.idea/vcs.xml" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/README.md" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/app/__init__.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/app/gws.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/app/main.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/app/ui_teacher.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/concept/__init__.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/concept/clustering.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/concept/graph.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/config/meta.yaml" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/config/safety.yaml" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/config/tools.yaml" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/config/value.yaml" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/control/__init__.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/control/candidates.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/control/planner.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/control/policy.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/env/__init__.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/env/io_text.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/lang/__init__.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/lang/format.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/lang/parse.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/logs/incidents/.gitkeep" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/logs/sleep/.gitkeep" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/memory/__init__.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/memory/episodic.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/memory/index_faiss.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/memory/wm.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/models/.gitkeep" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/perception/__init__.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/perception/encoder.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/perception/train_contrastive.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/pyproject.toml" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/requirements.txt" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/safety/__init__.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/safety/dsl.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/safety/shield.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/scripts/__init__.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/scripts/init_faiss.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/scripts/migrate_parquet.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/selfmeta/__init__.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/selfmeta/calibrate.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/selfmeta/self_model.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/skills/__init__.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/skills/invoke_calc.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/skills/manifest.yaml" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/skills/reply_greeting.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/sleep/__init__.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/sleep/offline.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/tests/regression/arith-2plus2.yaml" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/tests/regression/style-greeting.yaml" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/tests/test_runner.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/toolhub/__init__.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/toolhub/registry.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/toolhub/verify.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/value/__init__.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/value/reward.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/world/__init__.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/world/dynamics.py" afterDir="false" />
+    </list>
+    <option name="SHOW_DIALOG" value="false" />
+    <option name="HIGHLIGHT_CONFLICTS" value="true" />
+    <option name="HIGHLIGHT_NON_ACTIVE_CHANGELIST" value="false" />
+    <option name="LAST_RESOLUTION" value="IGNORE" />
+  </component>
+  <component name="Git.Settings">
+    <option name="RECENT_GIT_ROOT_PATH" value="$PROJECT_DIR$" />
+  </component>
+  <component name="GithubPullRequestsUISettings"><![CDATA[{
+  "selectedUrlAndAccountId": {
+    "url": "https://github.com/pinto-team/noema.git",
+    "accountId": "576ae13f-4d62-4d67-bb41-86a7354a3858"
+  }
+}]]></component>
+  <component name="ProjectColorInfo">{
+  &quot;associatedIndex&quot;: 1
+}</component>
+  <component name="ProjectId" id="34o82GIC1EnhQLSBhQqQdykL0Pf" />
+  <component name="ProjectLevelVcsManager">
+    <ConfirmationsSetting value="2" id="Add" />
+  </component>
+  <component name="ProjectViewState">
+    <option name="hideEmptyMiddlePackages" value="true" />
+    <option name="showLibraryContents" value="true" />
+  </component>
+  <component name="PropertiesComponent">{
+  &quot;keyToString&quot;: {
+    &quot;ModuleVcsDetector.initialDetectionPerformed&quot;: &quot;true&quot;,
+    &quot;RunOnceActivity.ShowReadmeOnStart&quot;: &quot;true&quot;,
+    &quot;RunOnceActivity.git.unshallow&quot;: &quot;true&quot;,
+    &quot;git-widget-placeholder&quot;: &quot;master&quot;,
+    &quot;last_opened_file_path&quot;: &quot;D:/noema&quot;,
+    &quot;node.js.detected.package.eslint&quot;: &quot;true&quot;,
+    &quot;node.js.detected.package.tslint&quot;: &quot;true&quot;,
+    &quot;node.js.selected.package.eslint&quot;: &quot;(autodetect)&quot;,
+    &quot;node.js.selected.package.tslint&quot;: &quot;(autodetect)&quot;,
+    &quot;nodejs_package_manager_path&quot;: &quot;npm&quot;,
+    &quot;vue.rearranger.settings.migration&quot;: &quot;true&quot;
+  }
+}</component>
+  <component name="RecentsManager">
+    <key name="CopyFile.RECENT_KEYS">
+      <recent name="D:\noema" />
+    </key>
+  </component>
+  <component name="SharedIndexes">
+    <attachedChunks>
+      <set>
+        <option value="bundled-js-predefined-d6986cc7102b-f27c65a3e318-JavaScript-PY-251.23774.444" />
+        <option value="bundled-python-sdk-890ed5b35930-d9c5bdb153f4-com.jetbrains.pycharm.pro.sharedIndexes.bundled-PY-251.23774.444" />
+      </set>
+    </attachedChunks>
+  </component>
+  <component name="TaskManager">
+    <task active="true" id="Default" summary="Default task">
+      <changelist id="4ee551c1-7352-4cbd-a52e-350e9bd721bc" name="Changes" comment="" />
+      <created>1761868354267</created>
+      <option name="number" value="Default" />
+      <option name="presentableId" value="Default" />
+      <updated>1761868354267</updated>
+      <workItem from="1761868355315" duration="719000" />
+      <workItem from="1761940823158" duration="1411000" />
+      <workItem from="1761942303891" duration="4877000" />
+    </task>
+    <servers />
+  </component>
+  <component name="TypeScriptGeneratedFilesManager">
+    <option name="version" value="3" />
+  </component>
+</project>

@@ -1,0 +1,18 @@
+# NOEMA • tests/regression/style-greeting.yaml
+# هدف: اطمینان از اینکه پیام سلام → پاسخ سلامِ دوستانه برمی‌گردد.
+
+meta:
+  id: "style-greeting"
+  desc: "پاسخ سلام باید تولید شود."
+  tags: ["greeting", "smoke"]
+
+input:
+  user_text: "سلام!"
+
+plan_hint:
+  intent: "greeting"
+
+expect:
+  intent: "greeting"
+  text_contains: ["سلام", "خوش"]
+  not_contains: ["خطا", "نامعتبر"]

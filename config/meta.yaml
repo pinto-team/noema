@@ -1,0 +1,27 @@
+# NOEMA • config/meta.yaml
+# فرا-تنظیمات سبک پاسخ و کنترل‌گر تصمیم
+
+# ------------------------
+# سبک زبانی (lang/format.py)
+# ------------------------
+tone: friendly          # friendly | neutral
+formal: false           # اگر true → لحن رسمی‌تر
+max_len: 500            # حداکثر طول متن خروجی
+prefix_emoji: true      # در سلام، یک ایموجی کوچک اضافه شود
+show_confidence: false  # برای دیباگ: نمایش [اطمینان:x.xx]
+
+# ------------------------
+# کنترل‌گر تصمیم (control/init.py)
+# ------------------------
+control_method: "argmax"      # "argmax" | "softmax"
+control_temperature: 0.6      # در صورت softmax
+
+use_planner: true             # فعال‌سازی برنامه‌ریز کوتاه‌مدت
+planner_beam: 4               # اندازه‌ی بیم
+planner_depth: 2              # عمق جست‌وجو (تعداد گام‌های آینده)
+planner_gamma: 0.9            # ضریب تنزیل
+
+# ------------------------
+# گزینه‌های تکمیلی (رزرو برای آینده)
+# ------------------------
+lang_code: "fa"               # کد زبان پیش‌فرض

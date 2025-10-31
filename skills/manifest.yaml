@@ -1,0 +1,26 @@
+# NOEMA • skills/manifest.yaml — فهرست مهارت‌های درون‌سیستمی (V0)
+# هر مهارت یک تابع پایتونی است که توسط لایه‌ی اجرا (app/*) صدا زده می‌شود.
+# نام‌ها باید با control/candidates.py هماهنگ باشند.
+
+skills:
+  - name: reply_greeting
+    kind: skill
+    desc: "پاسخ مودبانه/دوستانه به سلام"
+    entry: "skills.reply_greeting:run"   # ماژول:تابع
+    tags: ["basic", "safe"]
+    allowed_args: {}                     # بدون آرگومان
+    cost: 0.02
+
+  - name: invoke_calc
+    kind: tool
+    desc: "ماشین‌حساب امن چهار عمل اصلی"
+    # برای هم‌خوانی با رجیستری ابزار، این مورد معمولاً از toolhub بارگذاری/بایند می‌شود.
+    # در صورت نبود config/tools.yaml، toolhub/__init__.py یک نسخه‌ی امن را بایند می‌کند.
+    entry: null
+    tags: ["basic", "safe"]
+    allowed_args:
+      expr:
+        type: "str"
+        regex: "^[0-9+\\-*/() \\t]+$"
+        max_len: 256
+    cost: 0.05
