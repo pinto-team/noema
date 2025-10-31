@@ -33,7 +33,7 @@ Repository = "https://example.com/noema/repo"
 # اسکریپت‌های خط فرمان سبک (اختیاری)
 [project.scripts]
 noema-tests = "tests.test_runner:main"
-noema-sleep = "sleep.init:run_once"
+noema-sleep = "sleep:run_once"
 
 # -------------------- Setuptools --------------------
 
