@@ -204,6 +204,11 @@ class NoemaCore:
 
         self.wm = WorkingMemory(maxlen=32) if WorkingMemory else None
         self.last_decision: Dict[str, Any] = {}
+        self.last_transition: Optional[Transition] = None
+        self.last_outcome: Optional[Outcome] = None
+        self.last_action: Optional[Action] = None
+        self.last_plan: Dict[str, Any] = {}
+        self.last_reward: Optional[RewardPkt] = None
 
     # ----- ابزارهای کمکی -----
     def _estimate_compute_cost(self, action_name: str) -> int:
@@ -614,6 +619,11 @@ class NoemaCore:
             plan=plan,
             text_in=obs.payload,
         )
+        self.last_transition = transition
+        self.last_outcome = outcome
+        self.last_action = a_star
+        self.last_plan = dict(plan)
+        self.last_reward = pkt
         self.write_memory(transition)
         self.last_decision = decision_meta
         return outcome.text_out or ""
