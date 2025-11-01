@@ -190,13 +190,13 @@ with st.sidebar:
         if st.session_state.history:
             if _log_last_reply(int(st.session_state.pending_reward)):
                 st.session_state.pending_reward = 0
-                st.experimental_rerun()
+                st.rerun()
         else:
             st.info("هنوز پاسخی برای ارزیابی وجود ندارد.")
 
     if st.button("♻️ آغاز جلسهٔ تازه"):
         _reset_session()
-        st.experimental_rerun()
+        st.rerun()
 
     st.markdown("---")
     env_path = Path(st.session_state.episodes_root) / "episodes.jsonl"
@@ -275,4 +275,4 @@ if user_message is not None:
         )
 
         st.session_state.pending_reward = 0
-        st.experimental_rerun()
+        st.rerun()
