@@ -9,7 +9,11 @@ NOEMA • tests/test_runner.py — اجرای سادهٔ تست‌های رگر�
 """
 
 from __future__ import annotations
-import argparse, glob, json, sys
+import argparse
+import glob
+import importlib
+import json
+import sys
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -20,12 +24,12 @@ try:
 except Exception:
     _HAS_YAML = False
 
-# وارد کردن اجزای سبک نوما
-from lang import parse as parse_intent, format_reply, load_style
+lang_parse = importlib.import_module("lang.parse")
 from skills import load_skills
-from skills import __dict__ as _skills_pkg  # برای resolve مستقیم ماژول‌ها
 from skills.invoke_calc import run as run_calc
 from skills.reply_greeting import run as run_greet
+from skills.reply_smalltalk import run as run_smalltalk
+from skills.reply_from_memory import run as run_memory
 
 def _load_case(path: str) -> Dict[str, Any]:
     text = Path(path).read_text(encoding="utf-8")
@@ -65,13 +69,68 @@ def _assertions(expect: Dict[str, Any], intent: str, text_out: str, outcome: Dic
 
     return errs
 
+_ARTIFACTS = [
+    Path("config/learned_rules.yaml"),
+    Path("data/demo_memory.jsonl"),
+    Path("data/demo_index.npz"),
+    Path("data/demo_vocab.json"),
+    Path("models/intent_clf.joblib"),
+]
+
+
+def _reset_artifacts() -> None:
+    for p in _ARTIFACTS:
+        try:
+            if p.exists():
+                p.unlink()
+        except Exception:
+            continue
+
+
+def _apply_setup(setup: Dict[str, Any] | None) -> None:
+    _reset_artifacts()
+    setup = setup or {}
+
+    if setup.get("learned_rules"):
+        Path("config").mkdir(parents=True, exist_ok=True)
+        target = Path("config/learned_rules.yaml")
+        data = setup["learned_rules"]
+        if _HAS_YAML:
+            with target.open("w", encoding="utf-8") as fh:
+                yaml.safe_dump(data, fh, allow_unicode=True, sort_keys=False)
+        else:
+            target.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+
+    demos = setup.get("demos") or []
+    if demos:
+        Path("data").mkdir(parents=True, exist_ok=True)
+        mem_path = Path("data/demo_memory.jsonl")
+        text = "\n".join(json.dumps(obj, ensure_ascii=False) for obj in demos)
+        mem_path.write_text(text, encoding="utf-8")
+
+    labels = setup.get("labels") or []
+    if labels:
+        Path("logs").mkdir(parents=True, exist_ok=True)
+        Path("logs/teacher_events.jsonl").write_text("", encoding="utf-8")
+
+    importlib.reload(lang_parse)
+
+
+def _extract_user_text(inp: Any) -> str:
+    if isinstance(inp, str):
+        return inp
+    if isinstance(inp, dict):
+        return str(inp.get("user_text", ""))
+    return str(inp or "")
+
+
 def run_case(case: Dict[str, Any], path: str) -> Dict[str, Any]:
-    inp = case.get("input") or {}
+    inp = case.get("input")
     plan_hint = case.get("plan_hint") or {}
-    user_text = str(inp.get("user_text", ""))
+    user_text = _extract_user_text(inp)
 
     # 1) برنامه/نیت
-    plan = parse_intent(user_text)
+    plan = lang_parse.parse(user_text)
     if isinstance(plan_hint, dict) and plan_hint:
         plan.update(plan_hint)
 
@@ -81,10 +140,17 @@ def run_case(case: Dict[str, Any], path: str) -> Dict[str, Any]:
         out = run_greet(user_text=user_text, plan=plan)
     elif intent == "compute":
         out = run_calc(user_text=user_text, plan=plan)
+    elif intent == "smalltalk":
+        out = run_smalltalk(user_text=user_text, plan=plan)
+    elif intent == "memory.reply":
+        out = run_memory(user_text=user_text, plan=plan)
     else:
-        # پاسخ ناشناخته مینیمال
-        txt = format_reply(intent="unknown", outcome={}, style=load_style(), meta={"confidence":0.4})
-        out = {"intent":"unknown","outcome":{},"text_out":txt,"meta":{"confidence":0.4}}
+        out = {
+            "intent": intent,
+            "outcome": {},
+            "text_out": "",
+            "meta": {"confidence": plan.get("confidence", 0.4)},
+        }
 
     # 3) ارزیابی
     expect = case.get("expect") or {}
@@ -112,6 +178,7 @@ def main(pattern: str) -> int:
     fails = 0
     for fp in files:
         case = _load_case(fp)
+        _apply_setup(case.get("setup"))
         res = run_case(case, fp)
         results.append(res)
         status = "PASS" if res["ok"] else "FAIL"

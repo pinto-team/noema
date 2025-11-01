@@ -195,7 +195,7 @@ class NoemaCore:
                 names_for_fallback.extend(self.skills.list_all())
             except Exception:
                 pass
-        names_for_fallback.extend(["reply_greeting", "invoke_calc"])
+        names_for_fallback.extend(["reply_greeting", "invoke_calc", "reply_smalltalk", "reply_from_memory"])
         self.skill_fallbacks: Dict[str, Callable[..., Dict[str, Any]]] = {}
         for name in dict.fromkeys(names_for_fallback):
             fn = _try_import(f"skills.{name}", "run")
@@ -314,13 +314,23 @@ class NoemaCore:
                     return plan
             except Exception:
                 pass
+        fa_digits = str.maketrans("۰۱۲۳۴۵۶۷۸۹", "0123456789")
+        ar_digits = str.maketrans("٠١٢٣٤٥٦٧٨٩", "0123456789")
+        ascii_math = (
+            text.translate(fa_digits).translate(ar_digits)
+            .replace("×", "*")
+            .replace("÷", "/")
+            .replace("−", "-")
+            .replace("–", "-")
+            .replace("—", "-")
+        )
         if _is_greeting(text):
             return {"intent": "greeting", "args": {}, "confidence": 0.9}
-        m = re.search(r"([0-9+\-*/() 	]+)", text)
+        m = re.search(r"([0-9+\-*/() \t]+)", ascii_math)
         if m:
             expr = m.group(1)
             return {"intent": "compute", "args": {"expr": expr, "raw": text}, "confidence": 0.82}
-        return {"intent": "unknown", "args": {"raw": text}, "confidence": 0.4}
+        return {"intent": "smalltalk", "args": {"raw": text}, "confidence": 0.6}
 
     # ----- بلوک 6: تولید نامزدها -----
     def generate_candidates(self, s: State, plan: Dict[str, Any]) -> List[Action]:
@@ -340,7 +350,9 @@ class NoemaCore:
             expr = args.get("expr")
             cand_args = {"expr": expr} if isinstance(expr, str) and expr.strip() else {}
             return [Action(kind="tool", name="invoke_calc", args=cand_args)]
-        return [Action(kind="policy", name="ask_clarify", args={})]
+        if intent == "smalltalk":
+            return [Action(kind="skill", name="reply_smalltalk", args={})]
+        return [Action(kind="skill", name="reply_from_memory", args={})]
 
     # ----- بلوک 10: سپر ایمنی -----
     def safety_check(self, s: State, a: Action) -> Tuple[bool, Dict[str, Any]]:

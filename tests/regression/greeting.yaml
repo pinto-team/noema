@@ -1,0 +1,6 @@
+name: greeting
+input: "سلام نوما"
+expect:
+  intent: greeting
+  text_contains: "سلام"
+label_ok: true
