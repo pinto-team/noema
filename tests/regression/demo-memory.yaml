@@ -1,0 +1,10 @@
+name: demo-memory
+setup:
+  demos:
+    - input: "خودتو معرفی کن"
+      output: "من نوما هستم؛ یک عامل آموزشی در حال یادگیری."
+input: "می‌شه خودتو معرفی کنی؟"
+expect:
+  intent: memory.reply
+  text_contains: "نوما"
+label_ok: true

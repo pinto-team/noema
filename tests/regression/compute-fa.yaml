@@ -1,0 +1,6 @@
+name: compute-fa
+input: "حاصل ۲×۳+۴ چنده؟"
+expect:
+  intent: compute
+  text_contains: "10"
+label_ok: true

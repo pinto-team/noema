@@ -1,0 +1,6 @@
+name: smalltalk
+input: "می‌خوام درباره پروژه بپرسم"
+expect:
+  intent: smalltalk
+  text_contains: "دارم یاد می‌گیرم"
+label_ok: true

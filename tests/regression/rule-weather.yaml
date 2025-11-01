@@ -1,0 +1,10 @@
+name: rule-weather
+setup:
+  learned_rules:
+    rules:
+      - intent: weather
+        patterns: ["آب و هوا", "هوا چطوره", "دمای"]
+input: "هوا چطوره امروز؟"
+expect:
+  intent: weather
+label_ok: true
