@@ -31,7 +31,7 @@ from env import TextIOEnv, make_text_env
 # ----- ابزارهای کمکی -----
 
 def _now_ts() -> str:
-    return datetime.utcnow().isoformat(timespec="seconds") + "Z"
+    return datetime.now().isoformat(timespec="seconds") + "Z"
 
 
 def _ensure_state() -> None:
