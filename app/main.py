@@ -16,7 +16,7 @@ import pathlib
 import random
 import re
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, asdict
 from time import time
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -25,6 +25,25 @@ try:
     from memory.wm import WorkingMemory  # type: ignore
 except Exception:
     WorkingMemory = None  # type: ignore
+
+# Optional episodic store
+try:
+    from memory.episodic import EpisodeStore  # type: ignore
+except Exception:
+    EpisodeStore = None  # type: ignore
+
+# Optional global workspace
+try:
+    from app.gws import GlobalWorkspace  # type: ignore
+except Exception:
+    GlobalWorkspace = None  # type: ignore
+
+# Optional sleep cycle
+try:
+    from sleep.offline import SleepCfg, run_sleep_cycle  # type: ignore
+except Exception:
+    SleepCfg = None  # type: ignore
+    run_sleep_cycle = None  # type: ignore
 
 
 # ========= Minimal data types =========
@@ -88,6 +107,7 @@ class Transition:
     ts: float
     plan: Dict[str, Any] = field(default_factory=dict)
     text_in: str = ""
+    focus: Optional[Dict[str, Any]] = None
 
 
 # ========= Lightweight helpers (fallback) =========
@@ -155,6 +175,28 @@ class NoemaCore:
         self.log_dir = pathlib.Path(log_dir)
         self.log_dir.mkdir(parents=True, exist_ok=True)
         self.episodes_file = self.log_dir / "episodes.jsonl"
+        self.session_id = "S-CLI-LOCAL"
+        self.episodes_root = pathlib.Path("data/episodes")
+        self.episodes_root.mkdir(parents=True, exist_ok=True)
+        self.episode_store = None
+        if EpisodeStore is not None:
+            try:
+                self.episode_store = EpisodeStore(self.episodes_root)
+            except Exception:
+                self.episode_store = None
+        self.gws = GlobalWorkspace() if GlobalWorkspace is not None else None
+        self.sleep_cfg = None
+        if SleepCfg is not None:
+            self.sleep_cfg = SleepCfg(
+                events_path=str(self.log_dir / "teacher_events.jsonl"),
+                episodes_root=str(self.episodes_root),
+                write_rules=True,
+                write_demos=True,
+                build_tfidf=True,
+                train_intent_clf=True,
+            )
+        self.last_focus: Optional[Dict[str, Any]] = None
+        self.last_sleep_report: Optional[Dict[str, Any]] = None
 
         # Basic energy costs per action (approximate)
         self.energy_costs: Dict[str, float] = {
@@ -527,6 +569,7 @@ class NoemaCore:
 
     # ----- Memory/logging -----
     def write_memory(self, tr: Transition) -> None:
+        focus = tr.focus or None
         rec = {
             "ts": tr.ts,
             "text_in": tr.text_in,
@@ -549,14 +592,63 @@ class NoemaCore:
         }
         if tr.outcome.raw:
             rec["outcome"]["raw"] = tr.outcome.raw
+        if focus:
+            rec["focus"] = focus
+        state_vec = []
+        try:
+            state_vec = list(getattr(tr.s, "s", []) or [])
+        except Exception:
+            state_vec = []
+        latent_vec = []
+        try:
+            latent_vec = list(getattr(tr.z, "z", []) or [])
+        except Exception:
+            latent_vec = []
+        if state_vec:
+            rec["state"]["s_vec"] = state_vec
+        if latent_vec:
+            rec["latent"] = {"z": latent_vec}
+
+        if self.episode_store is not None:
+            try:
+                tags = list(tr.plan.get("tags", []) or [])
+                mode = str(focus.get("mode")) if focus else ""
+                if mode:
+                    tags.append(f"focus:{mode}")
+                self.episode_store.log_transition(
+                    session_id=self.session_id,
+                    text_in=tr.text_in,
+                    state={"u": tr.s.u, "conf": tr.s.conf, "s": state_vec},
+                    latent={"z": latent_vec},
+                    action={"kind": tr.a.kind, "name": tr.a.name, "args": dict(tr.a.args or {})},
+                    outcome={
+                        "text_out": tr.outcome.text_out,
+                        "tests": tr.outcome.tests,
+                        "costs": tr.outcome.costs,
+                        "meta": tr.outcome.meta,
+                        "intent": tr.plan.get("intent"),
+                        "focus": focus,
+                    },
+                    reward={
+                        "r_int": tr.reward.r_int,
+                        "r_ext": tr.reward.r_ext,
+                        "r_total": tr.reward.r_total,
+                        "risk": tr.reward.risk,
+                        "energy": tr.reward.energy,
+                    },
+                    ts=tr.ts,
+                    tags=tags,
+                )
+            except Exception:
+                pass
         with self.episodes_file.open("a", encoding="utf-8") as f:
             f.write(json.dumps(rec, ensure_ascii=False, default=str) + "\n")
 
         if self.wm is not None:
             try:
                 self.wm.push(
-                    z=list(tr.z.z),
-                    s=list(tr.s.s),
+                    z=list(latent_vec),
+                    s=list(state_vec),
                     action={
                         "kind": tr.a.kind,
                         "name": tr.a.name,
@@ -573,6 +665,18 @@ class NoemaCore:
                 )
             except Exception:
                 pass
+
+    def _maybe_run_sleep_cycle(self) -> None:
+        if self.gws is None or self.sleep_cfg is None or run_sleep_cycle is None:
+            return
+        if not self.gws.should_sleep_now():
+            return
+        try:
+            report = run_sleep_cycle(self.sleep_cfg, verbose=False)
+            self.last_sleep_report = report
+            self.gws.mark_slept()
+        except Exception:
+            pass
 
     # ----- One-step loop -----
     def step(self, text_in: str, r_ext: float = 0.0) -> str:
@@ -594,7 +698,29 @@ class NoemaCore:
             plan["args"] = {}
         plan["args"].setdefault("raw", obs.payload)
 
+        focus_dict: Optional[Dict[str, Any]] = None
+        if self.gws is not None:
+            try:
+                focus_obj = self.gws.tick(
+                    text=obs.payload,
+                    intent=str(plan.get("intent", "unknown")),
+                    model_signals={
+                        "u_mean": float(getattr(s, "u", 0.0)),
+                        "risk": float(getattr(self.last_reward, "risk", 0.0)) if self.last_reward else 0.0,
+                    },
+                )
+                if focus_obj is not None:
+                    if hasattr(focus_obj, "__dataclass_fields__"):
+                        focus_dict = asdict(focus_obj)
+                    elif isinstance(focus_obj, dict):
+                        focus_dict = dict(focus_obj)
+            except Exception:
+                focus_dict = None
+        self.last_focus = focus_dict
+
         cands = self.generate_candidates(s, plan) or []
+        if focus_dict and focus_dict.get("mode") == "clarify-first":
+            cands.insert(0, Action(kind="policy", name="ask_clarify", args={}))
         filtered: List[Action] = []
         for cand in cands:
             allow, patch = self.safety_check(s, cand)
@@ -691,8 +817,16 @@ class NoemaCore:
                 }
                 for det in decision_details[:3]
             ]
+        if focus_dict:
+            decision_meta["focus"] = focus_dict
 
         outcome = self.execute(a_star, obs, plan, decision=decision_meta)
+        if focus_dict:
+            try:
+                outcome.meta.setdefault("focus", focus_dict)
+                outcome.meta.setdefault("gws_mode", focus_dict.get("mode"))
+            except Exception:
+                pass
         pkt = RewardPkt(
             r_int=r_int, r_ext=r_ext, r_total=r_total, risk=risk_hat, energy=energy_cost
         )
@@ -705,6 +839,7 @@ class NoemaCore:
             ts=_current_ts(),
             plan=plan,
             text_in=obs.payload,
+            focus=focus_dict,
         )
         self.last_transition = transition
         self.last_outcome = outcome
@@ -713,6 +848,7 @@ class NoemaCore:
         self.last_reward = pkt
         self.write_memory(transition)
         self.last_decision = decision_meta
+        self._maybe_run_sleep_cycle()
         return outcome.text_out or ""
 
 
