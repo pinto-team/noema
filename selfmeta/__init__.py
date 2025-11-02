@@ -1,18 +1,20 @@
 # -*- coding: utf-8 -*-
 """
 NOEMA • selfmeta package (V0)
-- مدلِ خود (Self-Model) + کالیبراسیونِ احتمال (online binning).
-- این فایل، سازنده‌های سطح‌بالا را فراهم می‌کند تا استفاده ساده باشد.
+- Self-Model + online probability calibration.
+- High-level helpers to load/save components.
 
-استفاده‌ی سریع:
-    from selfmeta import load_self_model, save_calibrator
-    sm, cal = load_self_model("data/calibration.json")
-    snap = sm.update({"u":0.25, "r_int":0.2, "r_total":0.5, "risk":0.0, "energy":0.03})
-    print(snap["confidence"])
-    save_calibrator(cal, "data/calibration.json")
+Quick start
+-----------
+from selfmeta import load_self_model, save_calibrator
+sm, cal = load_self_model("data/calibration.json")
+snap = sm.update({"u":0.25, "r_int":0.2, "r_total":0.5, "risk":0.0, "energy":0.03})
+print(snap["confidence"])
+save_calibrator(cal, "data/calibration.json")
 """
 
 from __future__ import annotations
+
 from pathlib import Path
 from typing import Optional, Tuple
 
@@ -27,7 +29,6 @@ __all__ = [
     "save_calibrator",
 ]
 
-# ---------------------------------------------------------------------
 
 def load_self_model(
     calib_path: str | Path = "data/calibration.json",
@@ -37,10 +38,10 @@ def load_self_model(
     create_if_missing: bool = True,
 ) -> Tuple[SelfModel, OnlineBinnedCalibrator]:
     """
-    یک SelfModel می‌سازد و (اختیاری) کالیبراتور را از فایل می‌خوانَد و متصل می‌کند.
-    اگر فایل وجود نداشت و create_if_missing=True باشد، یک کالیبراتور پیش‌فرض می‌سازد.
+    Build a SelfModel and (optionally) attach a calibrator loaded from disk.
+    If the file does not exist and create_if_missing=True, a default calibrator is created.
 
-    خروجی:
+    Returns:
         (self_model, calibrator)
     """
     sm = SelfModel(cfg or SelfModelCfg())
@@ -56,25 +57,16 @@ def load_self_model(
 
     return sm, cal  # type: ignore
 
+
 def save_calibrator(calibrator: OnlineBinnedCalibrator, path: str | Path) -> Path:
-    """
-    کالیبراتور را در مسیر داده‌شده ذخیره می‌کند.
-    """
+    """Persist the calibrator to JSON."""
     return calibrator.save(path)
 
-# ---------------------------------------------------------------------
 
 if __name__ == "__main__":
-    # تست سریع: بارگذاری/ساخت کالیبراتور و به‌روزرسانی یک اسنپ‌شات
+    # quick smoke
     sm, cal = load_self_model("data/calibration.json")
-    snap = sm.update({
-        "u": 0.30,          # عدم‌قطعیت
-        "r_int": 0.15,      # پیشرفت
-        "r_total": 0.40,    # پاداش شکل‌داده
-        "risk": 0.0,
-        "energy": 0.05,
-    })
+    snap = sm.update({"u": 0.30, "r_int": 0.15, "r_total": 0.40, "risk": 0.0, "energy": 0.05})
     print("conf:", round(snap["confidence"], 3), "| energy:", round(snap["energy"], 3))
-    # ذخیره‌ی کالیبراتور
     if cal is not None:
         save_calibrator(cal, "data/calibration.json")
