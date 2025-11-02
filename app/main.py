@@ -453,9 +453,23 @@ class NoemaCore:
             except Exception:
                 if self.strict:
                     raise
-        u_hat = 0.1 if a.name in ["reply_greeting", "invoke_calc"] else 0.4
+        # Estimate predicted uncertainty and reward based on skill type
+        if a.name in ["reply_greeting"]:
+            u_hat, rhat = 0.1, 0.5
+        elif a.name in ["invoke_calc"]:
+            u_hat, rhat = 0.15, 0.6
+        elif a.name in ["reply_from_memory"]:
+            # Praise / memory replies are safe and valuable
+            u_hat, rhat = 0.1, 0.8
+        elif a.name in ["reply_smalltalk"]:
+            u_hat, rhat = 0.25, 0.4
+        elif a.name in ["ask_clarify"]:
+            u_hat, rhat = 0.35, 0.2
+        else:
+            u_hat, rhat = 0.4, 0.1
+
         risk = 0.0
-        rhat = 0.5 if a.name in ["reply_greeting", "invoke_calc"] else 0.1
+
         return s, Latent(s.s), rhat, risk, u_hat
 
     # ----- Block 7: Intent parsing -----

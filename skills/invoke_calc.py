@@ -1,26 +1,11 @@
 # -*- coding: utf-8 -*-
-"""NOEMA • skills/invoke_calc.py — Safe calculator skill (V0).
-
-- Evaluates a simple arithmetic expression in a very restricted sandbox.
-- If a tool registry is available, it prefers invoking `invoke_calc` there;
-  otherwise it falls back to local safe eval.
-
-Contract:
-    run(
-        user_text: str = "",
-        *,
-        plan: dict | None = None,      # {"intent":"compute","args":{"expr": "..."}}
-        style: "lang.format.Style" | None = None,
-        tool_registry: "toolhub.ToolRegistry" | None = None,
-        extras: dict | None = None,
-        **kwargs
-    ) -> dict
-"""
+"""NOEMA • skills/invoke_calc.py — Safe calculator skill (improved V0)."""
 
 from __future__ import annotations
 
 from typing import Any, Dict, Optional
 import re
+import unicodedata
 
 # --- Style/formatter (optional) ---
 try:
@@ -47,24 +32,81 @@ try:
 except Exception:
     load_registry = None  # type: ignore
 
-_ASCII_EXPR_RE = re.compile(r"^[0-9+\-*/() \t]+$")
+# ------------------------ Regex / Maps ------------------------
+_ASCII_EXPR_RE = re.compile(r"^[0-9+\-*/() \t]+$")              # final safety gate
+_NUM_CHUNK_RE = re.compile(r"([0-9+\-*/() \t]{2,})")            # to extract first expr chunk
 
-_ARABIC_INDIC = str.maketrans("٠١٢٣٤٥٦٧٨٩", "0123456789")
+# Persian/Arabic digits -> ASCII
+_ARABIC_INDIC  = str.maketrans("٠١٢٣٤٥٦٧٨٩", "0123456789")
 _EXT_ARABIC_INDIC = str.maketrans("۰۱۲۳۴۵۶۷۸۹", "0123456789")
 
+# Zero-width / bidi chars
+_ZW_RE = re.compile(r"[\u200c\u200d\u200e\u200f\u202a-\u202e\u2066-\u2069]")
+
+# ------------------------ Normalizers ------------------------
+def _strip_zw(s: str) -> str:
+    return _ZW_RE.sub("", s)
+
 def _to_ascii_math(expr: str) -> str:
+    """Convert localized digits/symbols + common FA math words → ASCII operators."""
     if not isinstance(expr, str):
         return ""
-    out = expr.translate(_EXT_ARABIC_INDIC).translate(_ARABIC_INDIC)
-    out = (
-        out.replace("×", "*")
-        .replace("÷", "/")
-        .replace("−", "-")
-        .replace("–", "-")
-        .replace("—", "-")
-    )
+
+    # base normalization
+    out = expr
+    out = unicodedata.normalize("NFC", out)
+    out = _strip_zw(out)
+    out = out.translate(_EXT_ARABIC_INDIC).translate(_ARABIC_INDIC)
+
+    # symbol-level
+    out = (out.replace("×", "*")
+              .replace("÷", "/")
+              .replace("−", "-")
+              .replace("–", "-")
+              .replace("—", "-"))
+
+    # phrase-level (order matters; use word-boundary / context-aware replacements)
+    # ضرب/ضربدر → *
+    out = re.sub(r"\bضربدر\b", "*", out)
+    out = re.sub(r"\bضرب\b", "*", out)
+
+    # تقسیم بر / تقسیم → /
+    out = re.sub(r"\bتقسیم\s*بر\b", "/", out)
+    out = re.sub(r"\bتقسیم\b", "/", out)
+
+    # 'بر' فقط وقتی بین دو عدد است → /
+    out = re.sub(r"(?<=\d)\s*بر\s*(?=\d)", "/", out)
+
+    # به علاوه / جمع (بین اعداد) → +
+    out = re.sub(r"\bبه\s*علاوه\b", "+", out)
+    out = re.sub(r"(?<=\d)\s*جمع\s*(?=\d)", "+", out)
+
+    # منهای → -
+    out = re.sub(r"\bمنهای\b", "-", out)
+
+    # منفی n → -n
+    out = re.sub(r"\bمنفی\s*(\d+)", r"-\1", out)
+
+    # squeeze spaces
+    out = re.sub(r"\s+", " ", out).strip()
     return out
 
+def _first_expr(s: str) -> Optional[str]:
+    """Extract the first valid ASCII math expression after normalization."""
+    if not isinstance(s, str):
+        return None
+    norm = _to_ascii_math(s)
+    m = _NUM_CHUNK_RE.search(norm)
+    if not m:
+        return None
+    expr = (m.group(1) or "").strip()
+    if not expr:
+        return None
+    if not _ASCII_EXPR_RE.fullmatch(expr):
+        return None
+    return expr
+
+# ------------------------ Eval ------------------------
 def _safe_eval(expr: str) -> str:
     """Extremely limited eval: ASCII digits and + - * / ( ) and whitespace only."""
     if not isinstance(expr, str):
@@ -72,34 +114,46 @@ def _safe_eval(expr: str) -> str:
     expr = _to_ascii_math(expr).strip()
     if not _ASCII_EXPR_RE.fullmatch(expr):
         raise ValueError("invalid characters in expression")
-    return str(eval(expr, {"__builtins__": {}}, {}))
 
-_DEFAULT_META_OK = {"confidence": 0.88, "u": 0.12, "r_total": 0.0, "risk": 0.0}
+    # eval in empty builtins; our regex makes this safe.
+    try:
+        result = eval(expr, {"__builtins__": {}}, {})
+    except ZeroDivisionError as e:
+        raise ZeroDivisionError("division by zero") from e
+
+    # pretty result: drop trailing .0
+    if isinstance(result, float) and result.is_integer():
+        return str(int(result))
+    return str(result)
+
+_DEFAULT_META_OK  = {"confidence": 0.90, "u": 0.10, "r_total": 0.0, "risk": 0.0}
 _DEFAULT_META_ERR = {"confidence": 0.65, "u": 0.35, "r_total": -0.1, "risk": 0.0}
 
+# ------------------------ Extraction from plan/user text ------------------------
 def _extract_expr_from_plan_or_text(plan: Optional[Dict[str, Any]], user_text: str) -> Optional[str]:
     # 1) From plan.args
     if isinstance(plan, dict):
         args = plan.get("args") or {}
         expr = args.get("expr")
         if isinstance(expr, str) and expr.strip():
-            return expr.strip()
+            expr_norm = _to_ascii_math(expr.strip())
+            if _ASCII_EXPR_RE.fullmatch(expr_norm):
+                return expr_norm
         raw = args.get("raw")
         if isinstance(raw, str):
-            m = re.search(r"([0-9+\-*/() \t]{2,})", _to_ascii_math(raw))
-            if m:
-                cand = m.group(1).strip()
-                if _ASCII_EXPR_RE.fullmatch(cand):
-                    return cand
-    # 2) From user_text
-    if isinstance(user_text, str):
-        m = re.search(r"([0-9+\-*/() \t]{2,})", _to_ascii_math(user_text))
-        if m:
-            cand = m.group(1).strip()
-            if _ASCII_EXPR_RE.fullmatch(cand):
+            cand = _first_expr(raw)
+            if cand:
                 return cand
+
+    # 2) From user_text (FA/EN free-form)
+    if isinstance(user_text, str):
+        cand = _first_expr(user_text)
+        if cand:
+            return cand
+
     return None
 
+# ------------------------ Public API ------------------------
 def run(
     user_text: str = "",
     *,
@@ -120,11 +174,13 @@ def run(
             "outcome": {"expr": "", "result": ""},
             "text_out": text_out,
             "meta": dict(_DEFAULT_META_ERR),
-            "extras": dict(extras or {}),
+            "extras": {"expr_ascii": "", **dict(extras or {})},
             "label_ok": False,
         }
 
     result: Optional[str] = None
+    registry_source = "none"
+
     if tool_registry is None and load_registry is not None:
         try:
             tool_registry = load_registry()
@@ -134,12 +190,14 @@ def run(
     if tool_registry is not None:
         try:
             result = str(tool_registry.invoke("invoke_calc", expr=expr))
+            registry_source = "toolhub"
         except Exception:
             result = None  # fall back
 
     if result is None:
         try:
             result = _safe_eval(expr)
+            registry_source = "local"
         except Exception as e:
             outcome = {"expr": expr, "result": "invalid expression"}
             meta = dict(_DEFAULT_META_ERR)
@@ -150,7 +208,7 @@ def run(
                 "outcome": outcome,
                 "text_out": text_out,
                 "meta": meta,
-                "extras": dict(extras or {}),
+                "extras": {"expr_ascii": expr, "source": registry_source, **dict(extras or {})},
                 "label_ok": False,
             }
 
@@ -163,10 +221,15 @@ def run(
         "outcome": outcome,
         "text_out": text_out,
         "meta": meta,
-        "extras": dict(extras or {}),
+        "extras": {"expr_ascii": expr, "source": registry_source, **dict(extras or {})},
         "label_ok": True,
     }
 
+# ------------------------ Quick self-test ------------------------
 if __name__ == "__main__":
-    print(run(user_text="answer 7*(5-2)")["text_out"])  # demo
+    print(run(user_text="answer 7*(5-2)")["text_out"])                 # EN
     print(run(plan={"intent":"compute","args":{"expr":"2+2"}})["text_out"])
+    print(run(user_text="۹ تقسیم بر ۳")["text_out"])                   # → 9 / 3 = 3
+    print(run(user_text="3 ضرب 4")["text_out"])                        # → 3 * 4 = 12
+    print(run(user_text="2+2=")["text_out"])                           # → 2+2 = 4
+    print(run(user_text="حاصل ۲ به علاوه ۳؟")["text_out"])             # → 2+3 = 5

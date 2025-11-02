@@ -148,10 +148,23 @@ def _ensure_rule_dicts(spec: Any) -> List[Dict[str, Any]]:
       - [ {intent, patterns}, ... ]
       - {intent, patterns}
       - {"patterns_map": {"intentA": [...], "intentB": [...]}}
+
+    Fix: handle nested {"spec": {...}} or {"payload": {"spec": {...}}} structures
+    coming from teacher panel.
     """
     out: List[Dict[str, Any]] = []
     if spec is None:
         return out
+
+    # --- FIX: handle nested {"spec": {...}} ---
+    # Some RULE payloads may wrap the actual spec one level deeper.
+    # This ensures we always unwrap until reaching a usable dict.
+    depth_guard = 0
+    while isinstance(spec, dict) and "spec" in spec and isinstance(spec["spec"], dict):
+        spec = spec["spec"]
+        depth_guard += 1
+        if depth_guard > 3:  # avoid infinite recursion
+            break
 
     # {"rules": [...]}
     if isinstance(spec, dict) and isinstance(spec.get("rules"), list):
@@ -179,6 +192,7 @@ def _ensure_rule_dicts(spec: Any) -> List[Dict[str, Any]]:
         return out
 
     return out
+
 
 
 def _collect_events(events: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]]]:

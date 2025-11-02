@@ -4,11 +4,16 @@
     <option name="autoReloadType" value="SELECTIVE" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="4ee551c1-7352-4cbd-a52e-350e9bd721bc" name="Changes" comment="refactor 2">
-      <change beforePath="$PROJECT_DIR$/.idea/noema.iml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/noema.iml" afterDir="false" />
+    <list default="true" id="4ee551c1-7352-4cbd-a52e-350e9bd721bc" name="Changes" comment="refactor 3">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/skills/__init__.py" beforeDir="false" afterPath="$PROJECT_DIR$/skills/__init__.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/main.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/main.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/control/candidates.py" beforeDir="false" afterPath="$PROJECT_DIR$/control/candidates.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/lang/parse.py" beforeDir="false" afterPath="$PROJECT_DIR$/lang/parse.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/safety/shield.py" beforeDir="false" afterPath="$PROJECT_DIR$/safety/shield.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/skills/invoke_calc.py" beforeDir="false" afterPath="$PROJECT_DIR$/skills/invoke_calc.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/skills/manifest.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/skills/manifest.yaml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/skills/reply_from_memory.py" beforeDir="false" afterPath="$PROJECT_DIR$/skills/reply_from_memory.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/sleep/offline.py" beforeDir="false" afterPath="$PROJECT_DIR$/sleep/offline.py" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -100,6 +105,9 @@
       <workItem from="1762041570174" duration="2816000" />
       <workItem from="1762044677614" duration="2024000" />
       <workItem from="1762046893363" duration="1299000" />
+      <workItem from="1762111892079" duration="1883000" />
+      <workItem from="1762113830618" duration="5448000" />
+      <workItem from="1762119559844" duration="3373000" />
     </task>
     <task id="LOCAL‎−۰۰۰۰۱" summary="init">
       <option name="closed" value="true" />
@@ -136,7 +144,14 @@
       <option name="presentableId" value="LOCAL‎−۰۰۰۰۵" />
       <updated>1762045472810</updated>
     </task>
-    <option name="localTasksCounter" value="6" />
+    <task id="LOCAL‎−۰۰۰۰۶" summary="refactor 3">
+      <option name="closed" value="true" />
+      <created>1762111911864</created>
+      <option name="number" value="LOCAL‎−۰۰۰۰۶" />
+      <option name="presentableId" value="LOCAL‎−۰۰۰۰۶" />
+      <updated>1762111911864</updated>
+    </task>
+    <option name="localTasksCounter" value="7" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -159,7 +174,8 @@
     <MESSAGE value="base" />
     <MESSAGE value="refactor 1" />
     <MESSAGE value="refactor 2" />
-    <option name="LAST_COMMIT_MESSAGE" value="refactor 2" />
+    <MESSAGE value="refactor 3" />
+    <option name="LAST_COMMIT_MESSAGE" value="refactor 3" />
   </component>
   <component name="com.intellij.coverage.CoverageDataManagerImpl">
     <SUITE FILE_PATH="coverage/noema$demo_minimal.coverage" NAME="demo_minimal Coverage Results" MODIFIED="1762030748654" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$" />

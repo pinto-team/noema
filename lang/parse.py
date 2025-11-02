@@ -1,17 +1,10 @@
 # -*- coding: utf-8 -*-
 """
-NOEMA • lang/parse.py — Lightweight intent parsing & argument extraction (V0)
+NOEMA • lang/parse.py — Lightweight intent parsing & argument extraction (V0, improved)
 
-Purpose:
-  - Turn raw user text into a simple "plan" for the controller.
-  - Supported intents in V0: [greeting, compute, smalltalk, memory.reply] + learned RULE intents.
-  - For compute, tries to extract a safe arithmetic expression.
-  - If there is a similar DEMO example, surface memory.reply (to use memory skill).
-
-Notes:
-  - No heavy dependencies; relies on simple normalization, regex, and optional artifacts.
-  - Optional artifacts: config/learned_rules.yaml, models/intent_clf.joblib, data/demo_memory.jsonl
-  - Final argument validation is handled elsewhere (e.g., toolhub.verify).
+- Robust FA normalization (remove ZW chars, unifying Arabic/Farsi forms incl. آ→ا).
+- Compute extraction handles Persian operator words only when numbers are on both sides.
+- Intent order: learned RULE/CLARIFY → classifier → greeting → compute → demo-memory → smalltalk.
 """
 
 from __future__ import annotations
@@ -21,8 +14,9 @@ from typing import Any, Dict, Optional, List
 import json
 import os
 import re
+import unicodedata
 
-# Optional deps
+# ----------------------------- Optional deps -----------------------------
 try:
     import yaml  # type: ignore
 except Exception:  # pragma: no cover
@@ -33,89 +27,139 @@ try:
 except Exception:  # pragma: no cover
     joblib = None  # type: ignore
 
-# Optional normalization from perception; fallback is language-agnostic
+# ----------------------------- Zero-width & FA maps -----------------------------
+_ZW_RE = re.compile(r"[\u200c\u200d\u200e\u200f\u202a-\u202e\u2066-\u2069]")
+_FA_CHARMAP = str.maketrans({
+    "ي": "ی", "ك": "ک", "ۀ": "ه", "ة": "ه", "ؤ": "و", "إ": "ا", "أ": "ا", "ٱ": "ا", "آ": "ا", "ـ": ""
+})
+
+def _normalize_fa_text(t: str) -> str:
+    """NFC + remove ZW + unify FA/AR letters + squeeze spaces + lowercase."""
+    if not t:
+        return ""
+    t = unicodedata.normalize("NFC", t)
+    t = _ZW_RE.sub("", t)
+    t = t.translate(_FA_CHARMAP)
+    t = re.sub(r"\s+", " ", t).strip().lower()
+    return t
+
+# If perception.normalize_text exists, use it, else our FA-normalizer.
 try:
-    from perception import normalize_text  # type: ignore
-except Exception:
-    import unicodedata
-
+    from perception import normalize_text as _perception_norm  # type: ignore
     def normalize_text(t: str) -> str:
-        if not t:
-            return ""
-        t = unicodedata.normalize("NFC", t)
-        t = re.sub(r"\s+", " ", t).strip().lower()
-        return t
+        # Wrap to also remove ZW & unify FA chars even if perception provides a basic normalizer
+        return _normalize_fa_text(_perception_norm(t))
+except Exception:
+    def normalize_text(t: str) -> str:
+        return _normalize_fa_text(t)
 
-
-# Minimal multilingual greeting tokens (latin-script only; fallback)
-_GREET_WORDS = [
-    "hi",
-    "hello",
-    "hey",
-    "hola",
-    "hallo",
-    "ciao",
-    "salut",
-    "bonjour",
-    "namaste",
-    "ola",
-    "hei",
-]
+# ----------------------------- Greetings (fallback, latin) -----------------------------
+_GREET_WORDS = ["hi","hello","hey","hola","hallo","ciao","salut","bonjour","namaste","ola","hei"]
 _GREET_RE = re.compile("|".join([re.escape(w) for w in _GREET_WORDS]), re.IGNORECASE)
 
-# Compute hint keywords (language-agnostic fallback; latin tokens)
-_COMPUTE_HINT_RE = re.compile(
+# ----------------------------- Compute hints (EN + FA) -----------------------------
+_COMPUTE_HINT_EN_RE = re.compile(
     r"(result|compute|calculate|sum|plus|minus|multiply|divide|answer|equals|calc)",
     re.IGNORECASE,
 )
 
-# Safe arithmetic expression pattern (aligned with tool validation)
+_COMPUTE_HINT_FA_RE = re.compile(
+    r"(حاصل|محاسبه|نتیجه|چند\s*میشه|چنده|تقسیم\s*بر|تقسیم|ضرب\s*در|ضربدر|ضرب|"
+    r"به\s*علاوه|جمع|منهای)",
+    re.IGNORECASE,
+)
+
+# ----------------------------- Expression charset guards -----------------------------
 _EXPR_RE = re.compile(r"[0-9+\-*/() \t]+")
 
-# Map Arabic-Indic and Extended Arabic-Indic digits, and math-like symbols, to ASCII
 _ARABIC_INDIC = str.maketrans("٠١٢٣٤٥٦٧٨٩", "0123456789")
 _EXT_ARABIC_INDIC = str.maketrans("۰۱۲۳۴۵۶۷۸۹", "0123456789")
 
+# Visual math symbols → ASCII
+_VISUAL_MATH = {"×": "*", "÷": "/", "−": "-", "–": "-", "—": "-"}
 
-def _to_ascii_math(text: str) -> str:
-    if not text:
-        return ""
-    out = text.translate(_EXT_ARABIC_INDIC).translate(_ARABIC_INDIC)
-    out = (
-        out.replace("×", "*")
-        .replace("÷", "/")
-        .replace("−", "-")
-        .replace("–", "-")
-        .replace("—", "-")
-    )
+def _strip_cf(t: str) -> str:
+    return "".join(ch for ch in t if unicodedata.category(ch) != "Cf")
+
+def _digits_to_ascii(t: str) -> str:
+    return t.translate(_EXT_ARABIC_INDIC).translate(_ARABIC_INDIC)
+
+# ----------------------------- FA operator mapping (number-bound) -----------------------------
+# NOTE: only map operator words when numbers appear on both sides to avoid harming words like "درود/برنامه".
+_NUM = r"([0-9]+)"  # after digits_to_ascii we look only for ASCII digits
+
+_NUM_OP_PATTERNS: List[tuple[re.Pattern, str]] = [
+    (re.compile(_NUM + r"\s*تقسیم\s*بر\s*" + _NUM, re.IGNORECASE), r"\1 / \2"),
+    (re.compile(_NUM + r"\s*تقسیم\s*"    + _NUM, re.IGNORECASE),     r"\1 / \2"),
+    (re.compile(_NUM + r"\s*ضرب\s*در\s*" + _NUM, re.IGNORECASE),     r"\1 * \2"),
+    (re.compile(_NUM + r"\s*ضربدر\s*"    + _NUM, re.IGNORECASE),     r"\1 * \2"),
+    (re.compile(_NUM + r"\s*ضرب\s*"      + _NUM, re.IGNORECASE),     r"\1 * \2"),
+    (re.compile(_NUM + r"\s*در\s*"       + _NUM, re.IGNORECASE),     r"\1 * \2"),
+    (re.compile(_NUM + r"\s*به\s*علاوه\s*"+ _NUM, re.IGNORECASE),    r"\1 + \2"),
+    (re.compile(_NUM + r"\s*جمع\s*"      + _NUM, re.IGNORECASE),     r"\1 + \2"),
+    (re.compile(_NUM + r"\s*منهای\s*"    + _NUM, re.IGNORECASE),     r"\1 - \2"),
+    (re.compile(_NUM + r"\s*تا\s*"       + _NUM, re.IGNORECASE),     r"\1 * \2"),
+]
+
+def _map_fa_ops_when_number_bound(t: str) -> str:
+    s = t
+    for pat, rep in _NUM_OP_PATTERNS:
+        s = pat.sub(rep, s)
+    return s
+
+def _visual_symbols_to_ascii(t: str) -> str:
+    out = t
+    for k, v in _VISUAL_MATH.items():
+        out = out.replace(k, v)
     return out
 
+def _to_ascii_math(text: str) -> str:
+    """
+    Turn arbitrary text into a math-friendly ASCII string, carefully:
+    - remove ZW/Cf;
+    - normalize FA letters (esp. آ→ا so RULEs match variations);
+    - map FA/AR digits to ASCII;
+    - map Persian operator words ONLY when numbers appear on both sides;
+    - map visual math symbols to ASCII.
+    """
+    if not text:
+        return ""
+    t = _strip_cf(text)
+    t = _normalize_fa_text(t)           # unify FA letters, collapse spaces, lower
+    t = _digits_to_ascii(t)             # convert digits to ASCII
+    t = _map_fa_ops_when_number_bound(t)
+    t = _visual_symbols_to_ascii(t)
+    return t
 
-# Learned rules (RULE/CLARIFY) — optional
+# ----------------------------- Learned rules (RULE/CLARIFY) -----------------------------
 _LEARNED_RULES: List[Dict[str, Any]] = []
-if yaml is not None:
+def _load_learned_rules() -> List[Dict[str, Any]]:
+    if yaml is None:
+        return []
     try:
         rules_path = os.path.join("config", "learned_rules.yaml")
-        if os.path.exists(rules_path):
-            with open(rules_path, "r", encoding="utf-8") as fh:
-                data = yaml.safe_load(fh) or {}
-            raw_rules = list((data or {}).get("rules", []) or [])
-            normalized: List[Dict[str, Any]] = []
-            for item in raw_rules:
-                intent = str((item or {}).get("intent") or "").strip()
-                patterns: List[str] = []
-                for pat in list((item or {}).get("patterns", []) or []):
-                    pat_norm = normalize_text(str(pat)) if pat else ""
-                    if pat_norm:
-                        patterns.append(pat_norm)
-                if intent and patterns:
-                    normalized.append({"intent": intent, "patterns": patterns})
-            _LEARNED_RULES = normalized
+        if not os.path.exists(rules_path):
+            return []
+        with open(rules_path, "r", encoding="utf-8") as fh:
+            data = yaml.safe_load(fh) or {}
+        raw_rules = list((data or {}).get("rules", []) or [])
+        norm_rules: List[Dict[str, Any]] = []
+        for item in raw_rules:
+            intent = str((item or {}).get("intent") or "").strip()
+            patterns: List[str] = []
+            for pat in list((item or {}).get("patterns", []) or []):
+                pat_norm = normalize_text(str(pat)) if pat else ""
+                if pat_norm:
+                    patterns.append(pat_norm)
+            if intent and patterns:
+                norm_rules.append({"intent": intent, "patterns": patterns})
+        return norm_rules
     except Exception:
-        _LEARNED_RULES = []
+        return []
 
+_LEARNED_RULES = _load_learned_rules()
 
-# Optional intent classifier
+# ----------------------------- Optional intent classifier -----------------------------
 _INTENT_CLF = None
 if joblib is not None:
     try:
@@ -125,7 +169,7 @@ if joblib is not None:
     except Exception:
         _INTENT_CLF = None
 
-
+# ----------------------------- DEMO inputs for similarity -----------------------------
 def _load_demo_inputs() -> List[str]:
     path = os.path.join("data", "demo_memory.jsonl")
     if not os.path.exists(path):
@@ -147,9 +191,7 @@ def _load_demo_inputs() -> List[str]:
             inputs.append(text)
     return inputs
 
-
 _DEMO_INPUTS = _load_demo_inputs()
-
 
 def _demo_similarity(text: str) -> float:
     """Very simple Jaccard similarity over whitespace tokens against DEMO inputs."""
@@ -172,12 +214,17 @@ def _demo_similarity(text: str) -> float:
             best = score
     return best
 
-
+# ----------------------------- Helpers -----------------------------
 def _has_any_math_symbol(text: str) -> bool:
-    return any(ch in text for ch in "+-*/()×÷−–—")
-
+    # either ASCII math tokens or FA compute hints in the original text
+    return any(ch in text for ch in "+-*/()") or bool(_COMPUTE_HINT_FA_RE.search(text))
 
 def _extract_expr(text: str) -> Optional[str]:
+    """
+    Try to extract a safe ASCII expression from already-normalized math text.
+    Accept only [0-9 + - * / ( )] to keep it safe.
+    """
+    # Find the longest plausible expression
     m = re.search(r"([0-9+\-*/() \t]{2,})", text)
     if not m:
         return None
@@ -188,26 +235,24 @@ def _extract_expr(text: str) -> Optional[str]:
         return None
     return expr
 
-
-# ---------------------------- Intent detection ----------------------------
-
+# ----------------------------- Intent detection -----------------------------
 def detect_intent(text: str) -> Dict[str, Any]:
     """
     Lightweight intent detection with optional learned artifacts.
     Returns: {"intent": "...", "confidence": 0.xx, "args": {...}}
     """
     raw = text or ""
-    t = normalize_text(raw)
-    t_math = _to_ascii_math(t)
+    t = normalize_text(raw)       # FA-robust normalization for lexical matching
+    t_math = _to_ascii_math(raw)  # math-oriented normalization from original raw
 
-    # 0) Learned rules (RULE/CLARIFY)
+    # 0) Learned rules (RULE/CLARIFY) — exact lexical contains on normalized strings
     for rule in _LEARNED_RULES or []:
         intent = rule.get("intent") or ""
         if not intent:
             continue
         patterns = list(rule.get("patterns") or [])
         if any(p and p in t for p in patterns):
-            return {"intent": intent, "confidence": 0.75, "args": {"raw": raw}}
+            return {"intent": intent, "confidence": 0.78, "args": {"raw": raw}}
 
     # 0.5) Optional intent classifier
     if _INTENT_CLF is not None:
@@ -231,47 +276,44 @@ def detect_intent(text: str) -> Dict[str, Any]:
         except Exception:
             pass
 
-    # 1) Greeting (fallback)
+    # 1) Greeting (fallback; english tokens)
     if _GREET_RE.search(t):
         return {"intent": "greeting", "confidence": 0.92, "args": {}}
 
-    # 2) Arithmetic
+    # 2) Arithmetic (handles FA operator words when numbers bound)
     expr = _extract_expr(t_math)
-    if expr or _has_any_math_symbol(t_math) or _COMPUTE_HINT_RE.search(t):
+    if expr or _has_any_math_symbol(raw) or _COMPUTE_HINT_EN_RE.search(t):
         if not expr:
-            # Symbols/hints present but no valid ASCII expr yet
+            # Hints present but no valid ASCII expr yet
             return {"intent": "compute", "confidence": 0.70, "args": {"raw": raw}}
         return {
             "intent": "compute",
-            "confidence": 0.85,
+            "confidence": 0.86,
             "args": {"expr": expr, "raw": raw},
         }
 
     # 2.5) DEMO memory similarity
     if _demo_similarity(t) >= 0.3:
-        return {"intent": "memory.reply", "confidence": 0.72, "args": {"raw": raw}}
+        return {"intent": "memory.reply", "confidence": 0.74, "args": {"raw": raw}}
 
-    # 3) Default
+    # 3) Default smalltalk
     return {"intent": "smalltalk", "confidence": 0.60, "args": {"raw": raw}}
 
-
-# ---------------------------- Public API ----------------------------
-
+# ----------------------------- Public API -----------------------------
 def parse(text: str, wm: Optional[Any] = None) -> Dict[str, Any]:
-    """
-    Public entry. `wm` is reserved for future use (e.g., short-term context).
-    """
-    plan = detect_intent(text)
-    return plan
+    """Public entry. `wm` reserved for future extensions."""
+    return detect_intent(text)
 
-
-# ---------------------------- Quick self-test ----------------------------
-
+# ----------------------------- Quick self-test -----------------------------
 if __name__ == "__main__":
     samples = [
         "hi there!",
         "2+2?",
-        "result of 7*(5-2)?",
+        "نتیجه ۷*(۵-۲)؟",
+        "حاصل ۲ به علاوه ۲",
+        "۹ تقسیم بر ۳",
+        "3 ضربدر 4",
+        "آفرین",
         "what's the weather like",
     ]
     for s in samples:

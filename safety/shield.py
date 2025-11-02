@@ -157,20 +157,13 @@ def reason_text(dec: Decision) -> str:
 # ---------------------- Minimal adapter for main.py ----------------------
 
 def check(state: Any, action: Any) -> Tuple[bool, Dict[str, Any], Dict[str, Any]]:
-    """
-    Adapter expected by main.py:
-    Input:  (state, action)
-    Output: (allow: bool, patch: dict, meta: dict)
-
-    - Uses loaded rules (lazy) with minimal context (no text/plan here).
-    - Does not modify the action (patch = {}), just decides allow or not.
-    """
     rules = _ensure_rules()
 
-    # Normalize inputs to our Action type
+    # Normalize inputs
     if not isinstance(action, Action):
         try:
-            a = Action(kind=str(action.kind), name=str(action.name), args=dict(getattr(action, "args", {}) or {}))
+            a = Action(kind=str(action.kind), name=str(action.name),
+                       args=dict(getattr(action, "args", {}) or {}))
         except Exception:
             a = Action(kind="policy", name="ask_clarify", args={})
     else:
@@ -185,7 +178,12 @@ def check(state: Any, action: Any) -> Tuple[bool, Dict[str, Any], Dict[str, Any]
     except Exception:
         st = {}
 
-    dec = check_action(text="", plan={"intent": "unknown"}, action=a, state=st, rules=rules, risk_base=0.0)
+    # --- bypass for known low-risk skills ---
+    if a.name in {"reply_greeting", "invoke_calc", "ask_clarify"}:
+        return True, {}, {"effect": "allow", "risk": 0.0, "reason": "low_risk_builtin"}
+
+    dec = check_action(text="", plan={"intent": "unknown"}, action=a,
+                       state=st, rules=rules, risk_base=0.0)
     allow = (dec.effect == "allow")
     patch: Dict[str, Any] = {}
     meta = {

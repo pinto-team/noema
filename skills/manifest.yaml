@@ -44,8 +44,8 @@ skills:
   - name: invoke_calc
     kind: tool
     desc: "Safe four-operator calculator"
-    entry:
-    tags: ["basic"]
+    entry: "skills.invoke_calc:run"
+    tags: [ "basic" ]
     allowed_args:
       expr:
         type: "str"
@@ -53,3 +53,4 @@ skills:
         max_len: 256
     cost: 0.05
     enabled: true
+
