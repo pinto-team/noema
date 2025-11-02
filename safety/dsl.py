@@ -1,29 +1,31 @@
 # -*- coding: utf-8 -*-
 """
-NOEMA • safety/dsl.py — DSL سبک برای قواعد ایمنی/قیود (V0، فقط stdlib + YAML اختیاری)
+NOEMA • safety/dsl.py — Minimal DSL for runtime safety rules (V0, stdlib-only + optional YAML)
 
-هدف:
-  - یک لایه‌ی بسیار ساده برای تعریف «قواعد ایمنی» به‌شکل YAML/JSON و ارزیابی آن‌ها
-    روی متن ورودی، نیت (plan)، و نامزدِ کنش.
-  - خروجی: تصمیم allow / block / review + دلایل + برآورد ریسک.
+Purpose
+-------
+Provide a tiny rule system to decide whether an action is "allow" / "block" / "review"
+given a context: { text, plan, action, state, risk_base }.
 
-ساختار فایل پیکربندی (نمونهٔ config/safety.yaml):
-------------------------------------------------------------------
+Config format (YAML or JSON)
+----------------------------
+Example `config/safety.yaml`:
+
 policies:
   - id: "deny_shell"
-    desc: "جلوگیری از اجرای هرگونه شِل یا دستور سیستم"
+    desc: "Block any shell/system command"
     when:
-      actions: ["run_shell", "call_os"]      # نام کنش/ابزار
-      intents: ["compute", "unknown"]        # اختیاری
+      actions: ["run_shell", "call_os"]
+      intents: ["compute", "unknown"]
       text_matches:
         deny:
           - "(?i)\\b(?:bash|sh|rm\\s+-rf|powershell|cmd\\.exe)\\b"
-    effect: "block"                           # "allow" | "block" | "review"
-    risk_delta: 0.6                           # افزایش ریسک (0..1)
-    message: "اجرای شِل مجاز نیست."
+    effect: "block"     # "allow" | "block" | "review"
+    risk_delta: 0.6
+    message: "Shell execution is not allowed."
 
   - id: "math_safe"
-    desc: "ماشین‌حساب امن"
+    desc: "Allow safe arithmetic"
     when:
       actions: ["invoke_calc"]
       text_matches:
@@ -33,38 +35,23 @@ policies:
     risk_delta: -0.2
 
   - id: "unknown_high_u"
-    desc: "اگر نیت نامعلوم و عدم‌قطعیت بالا باشد → مرور انسانی"
+    desc: "Review if intent unknown and uncertainty high"
     when:
       intents: ["unknown"]
-      max_conf: 0.5          # اگر confidence ≤ 0.5  (یا u ≥ 0.5)
+      max_conf: 0.5
     effect: "review"
     risk_delta: 0.2
-    message: "لطفاً شفاف‌سازی؛ نیت مشخص نیست."
-------------------------------------------------------------------
 
-روند ارزیابی:
-  1) همه‌ی policyها را بررسی می‌کنیم؛ هرکدام که match شوند یک «اثر» تولید می‌کند.
-  2) اولویت: block ≻ review ≻ allow
-  3) risk_base از context می‌آید (اگر نبود 0.0)، سپس risk_delta قواعد match‌شده جمع می‌شود
-     و در [0..1] کلیپ می‌گردد.
+API
+---
+load_policies(path="config/safety.yaml") -> List[Rule]
+evaluate(context, rules) -> Decision
+safe_decide_allow(context, rules) -> (allowed: bool, reason: str, Decision)
 
-Context مورد انتظار (dict):
-  {
-    "text":      str,                 # متن خام کاربر (اختیاری)
-    "plan":      {"intent": "...", ...},
-    "action":    {"name":"...", "kind":"...", "args":{...}},
-    "state":     {"u": float, "conf": float},  # اختیاری
-    "risk_base": float (0..1)
-  }
-
-API:
-  load_policies(path="config/safety.yaml") -> List[Rule]
-  evaluate(context, rules) -> Decision
-  safe_decide_allow(context, rules) -> (allowed: bool, reason: str, decision: Decision)
-
-یادداشت:
-  - این ماژول چیزی را «اجرا» نمی‌کند؛ صرفاً تصمیم ایمنی را پیشنهاد می‌دهد.
-  - در صورت نبود فایل، بدون قاعده عمل می‌کند (پیش‌فرض allow با risk_base).
+Notes
+-----
+- If the config file is missing or invalid, no rules are loaded (default allow with risk_base).
+- This module does not *execute* actions; it only suggests a decision.
 """
 
 from __future__ import annotations
@@ -74,14 +61,14 @@ from pathlib import Path
 import re
 import json
 
-# YAML اختیاری
+# Optional YAML
 try:
     import yaml  # type: ignore
     _HAS_YAML = True
 except Exception:
     _HAS_YAML = False
 
-# ───────────────────────────── داده‌های اصلی ─────────────────────────────
+# ----------------------------- Data Types -----------------------------
 
 @dataclass
 class WhenClause:
@@ -90,9 +77,9 @@ class WhenClause:
     kinds:   List[str] = field(default_factory=list)      # action.kind
     text_allow: List[re.Pattern] = field(default_factory=list)
     text_deny : List[re.Pattern] = field(default_factory=list)
-    min_conf: Optional[float] = None                      # اگر conf ≥ min_conf
-    max_conf: Optional[float] = None                      # اگر conf ≤ max_conf
-    max_u: Optional[float] = None                         # اگر u ≤ max_u (برای معکوس conf)
+    min_conf: Optional[float] = None                      # match if conf ≥ min_conf
+    max_conf: Optional[float] = None                      # match if conf ≤ max_conf
+    max_u: Optional[float] = None                         # match if u ≤ max_u (uncertainty)
 
 @dataclass
 class Rule:
@@ -106,18 +93,18 @@ class Rule:
 @dataclass
 class Decision:
     effect: str                   # "allow" | "block" | "review"
-    matched: List[str]            # لیست id قواعد match‌شده
-    risk: float                   # ریسک نهایی کلیپ‌شده [0..1]
-    reasons: List[str]            # توضیحات/پیام‌ها
+    matched: List[str]
+    risk: float                   # clipped to [0..1]
+    reasons: List[str]
     details: Dict[str, Any] = field(default_factory=dict)
 
-# ───────────────────────────── کمکی‌ها ─────────────────────────────
+# ----------------------------- Helpers -----------------------------
 
 _RE_FLAGS = re.IGNORECASE | re.MULTILINE
 
 def _compile_patterns(spec: Dict[str, Any]) -> Tuple[List[re.Pattern], List[re.Pattern]]:
-    allow = []
-    deny  = []
+    allow: List[re.Pattern] = []
+    deny:  List[re.Pattern] = []
     if not isinstance(spec, dict):
         return allow, deny
     for k, bucket in (("allow", allow), ("deny", deny)):
@@ -130,7 +117,8 @@ def _compile_patterns(spec: Dict[str, Any]) -> Tuple[List[re.Pattern], List[re.P
     return allow, deny
 
 def _norm_list(x) -> List[str]:
-    if x is None: return []
+    if x is None:
+        return []
     if isinstance(x, (list, tuple, set)):
         return [str(v).strip().lower() for v in x if str(v).strip()]
     return [str(x).strip().lower()]
@@ -141,7 +129,7 @@ def _float_or_none(x) -> Optional[float]:
     except Exception:
         return None
 
-# ───────────────────────────── لود پالیسی ─────────────────────────────
+# ----------------------------- Load Policies -----------------------------
 
 def _parse_rule(d: Dict[str, Any]) -> Optional[Rule]:
     try:
@@ -178,7 +166,7 @@ def load_policies(path: str | Path = "config/safety.yaml") -> List[Rule]:
     if not p.exists():
         return []
     text = p.read_text(encoding="utf-8")
-    data = {}
+    data: Dict[str, Any] = {}
     if _HAS_YAML:
         try:
             data = yaml.safe_load(text) or {}
@@ -192,10 +180,11 @@ def load_policies(path: str | Path = "config/safety.yaml") -> List[Rule]:
     rules: List[Rule] = []
     for obj in (data.get("policies") or []):
         r = _parse_rule(obj or {})
-        if r: rules.append(r)
+        if r:
+            rules.append(r)
     return rules
 
-# ───────────────────────────── ارزیابی ─────────────────────────────
+# ----------------------------- Evaluation -----------------------------
 
 def _match_rule(ctx: Dict[str, Any], r: Rule) -> bool:
     plan = dict(ctx.get("plan") or {})
@@ -214,37 +203,36 @@ def _match_rule(ctx: Dict[str, Any], r: Rule) -> bool:
     # kind
     if r.when.kinds and a_kind not in r.when.kinds:
         return False
-    # conf / u
+    # confidence / uncertainty constraints
     state = dict(ctx.get("state") or {})
     conf = state.get("conf", None)
     u    = state.get("u", None)
     if r.when.min_conf is not None and isinstance(conf, (int, float)):
-        if float(conf) < float(r.when.min_conf): return False
+        if float(conf) < float(r.when.min_conf):
+            return False
     if r.when.max_conf is not None and isinstance(conf, (int, float)):
-        if float(conf) > float(r.when.max_conf): return False
+        if float(conf) > float(r.when.max_conf):
+            return False
     if r.when.max_u is not None and isinstance(u, (int, float)):
-        if float(u) > float(r.when.max_u): return False
+        if float(u) > float(r.when.max_u):
+            return False
 
-    # متن: deny اگر هرکدام match شوند → رد
+    # deny patterns: if any match, the rule matches (effect typically "block")
     if r.when.text_deny:
         for pat in r.when.text_deny:
             if pat.search(text or ""):
-                return True  # همین که الگوی deny در when آمده، یعنی این rule «match» شده و اثرش اعمال می‌شود
-        # اگر deny تعریف شده ولی هیچ‌کدام match نشد، rule را matched حساب نکن
+                return True
         return False
 
-    # متن: allow اگر الگوهای allow تعریف شده باشند، باید دست‌کم یکی match شود
+    # allow patterns: if provided, at least one must match
     if r.when.text_allow:
         ok = any(pat.search(text or "") for pat in r.when.text_allow)
         return ok
 
-    # بدون قیود متنی → اگر تا اینجا رد نشده، match تلقی کن
+    # no textual constraints → matched
     return True
 
 def evaluate(context: Dict[str, Any], rules: List[Rule]) -> Decision:
-    """
-    تمام قواعد را ارزیابی می‌کند و تصمیم نهایی را می‌سازد.
-    """
     matched: List[Rule] = []
     for r in rules:
         try:
@@ -253,7 +241,7 @@ def evaluate(context: Dict[str, Any], rules: List[Rule]) -> Decision:
         except Exception:
             continue
 
-    # ریسک
+    # accumulate risk
     risk = float(context.get("risk_base", 0.0) or 0.0)
     reasons: List[str] = []
     effects = set()
@@ -265,17 +253,15 @@ def evaluate(context: Dict[str, Any], rules: List[Rule]) -> Decision:
         elif r.desc:
             reasons.append(f"{r.id}: {r.desc}")
 
-    # اولویت اثر
+    # effect priority: block > review > allow
     if "block" in effects:
         eff = "block"
     elif "review" in effects:
         eff = "review"
-    elif matched:
-        eff = "allow"
     else:
         eff = "allow"
 
-    # کلیپ ریسک
+    # clip risk
     risk = max(0.0, min(1.0, risk))
 
     return Decision(
@@ -283,51 +269,27 @@ def evaluate(context: Dict[str, Any], rules: List[Rule]) -> Decision:
         matched=[r.id for r in matched],
         risk=risk,
         reasons=reasons,
-        details={"n_rules": len(rules), "n_matched": len(matched)}
+        details={"n_rules": len(rules), "n_matched": len(matched)},
     )
 
 def safe_decide_allow(context: Dict[str, Any], rules: List[Rule]) -> Tuple[bool, str, Decision]:
-    """
-    میان‌بُر: True اگر اجازه داده شود (اثر allow)، به‌همراه دلیل کوتاه و کل تصمیم.
-    """
     dec = evaluate(context, rules)
     allowed = (dec.effect == "allow")
     reason = " / ".join(dec.reasons) if dec.reasons else ("ok" if allowed else dec.effect)
     return allowed, reason, dec
 
-# ───────────────────────────── اجرای مستقیم (تست سریع) ─────────────────────────────
-
 if __name__ == "__main__":
-    # ساخت چند قاعده‌ی نمونه بدون فایل
+    # Small self-check
     rules = [
         Rule(
-            id="deny_shell",
-            desc="no shell",
-            effect="block",
-            risk_delta=0.6,
+            id="deny_shell", desc="no shell", effect="block", risk_delta=0.6,
             when=WhenClause(actions=["run_shell"], text_deny=[re.compile(r"\b(rm\s+-rf|bash|cmd\.exe)\b", _RE_FLAGS)])
         ),
         Rule(
-            id="math_safe",
-            desc="calc safe",
-            effect="allow",
-            risk_delta=-0.2,
+            id="math_safe", desc="calc safe", effect="allow", risk_delta=-0.2,
             when=WhenClause(actions=["invoke_calc"], text_allow=[re.compile(r"^[0-9+\-*/() \t]+$")])
         ),
-        Rule(
-            id="unknown_high_u",
-            desc="review if unknown with high uncertainty",
-            effect="review",
-            risk_delta=0.2,
-            when=WhenClause(intents=["unknown"], max_conf=0.5)
-        ),
     ]
-
-    # سناریوها
-    ctx1 = {"text":"2+2", "plan":{"intent":"compute"}, "action":{"name":"invoke_calc","kind":"tool"}, "state":{"u":0.2,"conf":0.8}}
-    ctx2 = {"text":"run rm -rf /", "plan":{"intent":"unknown"}, "action":{"name":"run_shell","kind":"tool"}, "state":{"u":0.3,"conf":0.7}}
-    ctx3 = {"text":"یک کاری کن", "plan":{"intent":"unknown"}, "action":{"name":"ask_clarify","kind":"policy"}, "state":{"u":0.7,"conf":0.3}}
-
-    for i, ctx in enumerate([ctx1, ctx2, ctx3], 1):
-        ok, reason, dec = safe_decide_allow(ctx, rules)
-        print(f"[case{i}] allowed={ok} effect={dec.effect} risk={dec.risk:.2f} matched={dec.matched} reason={reason}")
+    ctx = {"text": "2+2", "plan": {"intent": "compute"}, "action": {"name": "invoke_calc", "kind": "tool"}}
+    ok, reason, dec = safe_decide_allow(ctx, rules)
+    print("allowed:", ok, "effect:", dec.effect, "reason:", reason)

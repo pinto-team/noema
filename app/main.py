@@ -1,15 +1,16 @@
 # -*- coding: utf-8 -*-
 """
-NOEMA • app/main.py — Minimal execution loop for V0
+NOEMA • app/main.py — Minimal execution loop for V0 (with Strict Mode)
 
-- Self-contained: runs even if optional modules are missing.
-- Tries to import real modules (perception/world/lang/control/...) when available.
-- Provides two baseline capabilities out of the box: greeting reply and safe arithmetic.
+- Self-contained: runs even if optional modules are missing (non-strict).
+- Strict mode (--strict): requires all real modules to be present & working; disables fallbacks.
+- Provides two baseline capabilities out of the box (non-strict): greeting reply and safe arithmetic.
 - All comments/strings are English; no language-specific dependency is required.
 """
 
 from __future__ import annotations
 
+import importlib
 import json
 import math
 import pathlib
@@ -54,7 +55,7 @@ class Observation:
     payload: str
 
 
-# Try importing world.*; otherwise fall back to light stubs
+# Try importing world.*; otherwise fall back to light stubs (non-strict only)
 try:
     from world import Latent, State, Action  # type: ignore
 except Exception:
@@ -110,7 +111,57 @@ class Transition:
     focus: Optional[Dict[str, Any]] = None
 
 
-# ========= Lightweight helpers (fallback) =========
+# ========= REQUIRED symbols for Strict Mode =========
+REQUIRED_SYMBOLS: Dict[str, List[str]] = {
+    "perception.encoder": ["encode"],
+    "world": ["state", "predict"],
+    "lang.parse": ["parse"],  # one of parse|detect_intent required; checked separately
+    "control.candidates": ["generate"],
+    "control.policy": ["decide"],
+    "safety.shield": ["check"],
+    "value.reward": [
+        "get_default_spec",
+        "combine_rewards",
+        "shape_bonus",
+        "intrinsic_from_errors",
+    ],
+    "skills.reply_greeting": ["run"],
+    "skills.invoke_calc": ["run"],
+    "toolhub.registry": ["load_registry"],
+    "memory.wm": ["WorkingMemory"],
+    "memory.episodic": ["EpisodeStore"],
+    "app.gws": ["GlobalWorkspace"],
+    "sleep.offline": ["SleepCfg", "run_sleep_cycle"],
+}
+
+
+def _check_required(strict: bool) -> List[str]:
+    """Return list of missing symbols when strict=True; empty otherwise."""
+    if not strict:
+        return []
+    missing: List[str] = []
+    for mod, names in REQUIRED_SYMBOLS.items():
+        try:
+            m = importlib.import_module(mod)
+        except Exception:
+            missing.append(f"{mod} (import)")
+            continue
+        for n in names:
+            obj = getattr(m, n, None)
+            ok = callable(obj) or (obj is not None and n[:1].isupper())
+            if not ok:
+                missing.append(f"{mod}.{n}")
+    # at least one of parse|detect_intent must exist
+    try:
+        mp = importlib.import_module("lang.parse")
+        if not (callable(getattr(mp, "parse", None)) or callable(getattr(mp, "detect_intent", None))):
+            missing.append("lang.parse.parse|detect_intent (one required)")
+    except Exception:
+        missing.append("lang.parse (import)")
+    return missing
+
+
+# ========= Lightweight helpers (fallback; used only in non-strict or explicit) =========
 def _soft_hash(text: str, d: int = 32) -> List[float]:
     """Create a stable lightweight vector from text (placeholder encoder for V0)."""
     random.seed(0)
@@ -138,7 +189,6 @@ def _is_greeting(text: str) -> bool:
     Prefer dedicated NLP in lang.parse when available.
     """
     t = (text or "").strip().lower()
-    # A small multilingual (latin-script) set; no language-specific Unicode words here.
     tokens = (
         "hi",
         "hello",
@@ -152,7 +202,6 @@ def _is_greeting(text: str) -> bool:
         "ola",
         "hei",
     )
-    # If text is short and contains a common greeting token, treat as greeting.
     return any(tok in t for tok in tokens) and len(t) <= 40
 
 
@@ -171,7 +220,8 @@ def _try_import(module: str, attr: Optional[str] = None):
 
 # ========= NOEMA Core =========
 class NoemaCore:
-    def __init__(self, log_dir: str = "logs"):
+    def __init__(self, log_dir: str = "logs", strict: bool = False):
+        self.strict = bool(strict)
         self.log_dir = pathlib.Path(log_dir)
         self.log_dir.mkdir(parents=True, exist_ok=True)
         self.episodes_file = self.log_dir / "episodes.jsonl"
@@ -214,7 +264,7 @@ class NoemaCore:
         # EMA of prediction error for intrinsic reward
         self._ema_err_prev = 1.0
 
-        # Optional modules
+        # Optional modules (best-effort imports)
         self.modules: Dict[str, Any] = {
             "encode": _try_import("perception.encoder", "encode"),
             "state": _try_import("world", "state"),
@@ -233,12 +283,21 @@ class NoemaCore:
             "reward_intrinsic": _try_import("value.reward", "intrinsic_from_errors"),
         }
 
+        # In strict mode: verify presence of required symbols
+        missing = _check_required(self.strict)
+        if self.strict and missing:
+            raise RuntimeError(
+                "Strict mode: missing required symbols:\n  - " + "\n  - ".join(missing)
+            )
+
         spec_fn = self.modules.get("reward_spec")
         self.reward_spec = None
         if callable(spec_fn):
             try:
                 self.reward_spec = spec_fn()
-            except Exception:
+            except Exception as exc:
+                if self.strict:
+                    raise
                 self.reward_spec = None
 
         self.style = None
@@ -247,6 +306,8 @@ class NoemaCore:
             try:
                 self.style = style_loader()
             except Exception:
+                if self.strict:
+                    raise
                 self.style = None
 
         skills_loader = _try_import("skills", "load_skills")
@@ -255,6 +316,8 @@ class NoemaCore:
             try:
                 self.skills = skills_loader()
             except Exception:
+                if self.strict:
+                    raise
                 self.skills = None
 
         tool_loader = _try_import("toolhub", "load_registry")
@@ -263,6 +326,8 @@ class NoemaCore:
             try:
                 self.tool_registry = tool_loader()
             except Exception:
+                if self.strict:
+                    raise
                 self.tool_registry = None
 
         names_for_fallback: List[str] = []
@@ -279,6 +344,10 @@ class NoemaCore:
             fn = _try_import(f"skills.{name}", "run")
             if callable(fn):
                 self.skill_fallbacks[name] = fn
+
+        # Disable fallbacks in strict mode (only real skill registry allowed)
+        if self.strict:
+            self.skill_fallbacks = {}
 
         self.wm = WorkingMemory(maxlen=32) if WorkingMemory else None
         self.last_decision: Dict[str, Any] = {}
@@ -299,8 +368,9 @@ class NoemaCore:
                 if self.skills.has(name):
                     return True
             except Exception:
-                pass
-        return name in self.skill_fallbacks
+                if self.strict:
+                    raise
+        return (not self.strict) and (name in self.skill_fallbacks)
 
     def _run_skill(
         self,
@@ -324,7 +394,9 @@ class NoemaCore:
         if self.skills is not None:
             try:
                 has_registry = self.skills.has(name)
-            except Exception:
+            except Exception as exc:
+                if self.strict:
+                    raise
                 has_registry = False
 
         if has_registry:
@@ -333,13 +405,18 @@ class NoemaCore:
             except NotImplementedError:
                 pass
             except Exception as exc:
+                if self.strict:
+                    raise
                 return {"error": str(exc)}
 
-        fn = self.skill_fallbacks.get(name)
+        # fallback skills are disabled in strict mode
+        fn = self.skill_fallbacks.get(name) if not self.strict else None
         if callable(fn):
             try:
                 return fn(**params)
             except Exception as exc:
+                if self.strict:
+                    raise
                 return {"error": str(exc)}
         return None
 
@@ -350,7 +427,9 @@ class NoemaCore:
             try:
                 return Latent(fn(text))
             except Exception:
-                pass
+                if self.strict:
+                    raise
+        # non-strict fallback
         return Latent(_soft_hash(text))
 
     # ----- Block 2: State/prediction -----
@@ -362,7 +441,8 @@ class NoemaCore:
             try:
                 return fn(z_hist)
             except Exception:
-                pass
+                if self.strict:
+                    raise
         return State(s=z_hist[-1].z, u=0.2, conf=0.8)
 
     def predict(self, s: State, a: Action) -> Tuple[State, Latent, float, float, float]:
@@ -371,7 +451,8 @@ class NoemaCore:
             try:
                 return fn(s, a)
             except Exception:
-                pass
+                if self.strict:
+                    raise
         u_hat = 0.1 if a.name in ["reply_greeting", "invoke_calc"] else 0.4
         risk = 0.0
         rhat = 0.5 if a.name in ["reply_greeting", "invoke_calc"] else 0.1
@@ -386,7 +467,8 @@ class NoemaCore:
                 if isinstance(plan, dict):
                     return plan
             except Exception:
-                pass
+                if self.strict:
+                    raise
 
         detect_fn = self.modules.get("detect_intent")
         if callable(detect_fn):
@@ -395,9 +477,13 @@ class NoemaCore:
                 if isinstance(plan, dict):
                     return plan
             except Exception:
-                pass
+                if self.strict:
+                    raise
 
-        # Fallback parsing (language-agnostic heuristics)
+        # Fallback parsing (non-strict only)
+        if self.strict:
+            raise RuntimeError("Strict mode: intent parser failed and fallback is disabled.")
+
         fa_digits = str.maketrans("۰۱۲۳۴۵۶۷۸۹", "0123456789")
         ar_digits = str.maketrans("٠١٢٣٤٥٦٧٨٩", "0123456789")
         ascii_math = (
@@ -431,9 +517,18 @@ class NoemaCore:
             try:
                 return list(fn(s, plan, wm=self.wm, tool_registry=self.tool_registry))
             except TypeError:
-                return list(fn(s, plan))
+                # backward-compat for older signatures
+                try:
+                    return list(fn(s, plan))
+                except Exception:
+                    if self.strict:
+                        raise
             except Exception:
-                pass
+                if self.strict:
+                    raise
+
+        if self.strict:
+            raise RuntimeError("Strict mode: candidate generator failed and fallback is disabled.")
 
         intent = plan.get("intent")
         args = dict((plan.get("args") or {}) or {})
@@ -455,7 +550,9 @@ class NoemaCore:
                 allow, patch, _ = shield_fn(s, a)
                 return bool(allow), dict(patch or {})
             except Exception:
-                pass
+                if self.strict:
+                    raise
+        # non-strict default: allow
         return True, {}
 
     # ----- Block 5/8: Value & meta -----
@@ -473,7 +570,8 @@ class NoemaCore:
                 self._ema_err_prev = float(ema)
                 return float(r_int)
             except Exception:
-                pass
+                if self.strict:
+                    raise
 
         ema = 0.9 * self._ema_err_prev + 0.1 * err_now
         r_int = max(0.0, self._ema_err_prev - ema)
@@ -492,6 +590,10 @@ class NoemaCore:
         compute_cost = self._estimate_compute_cost(a.name)
         decision = decision or {}
         intent = plan.get("intent", "unknown")
+
+        # Strict guard: if an external skill/tool is requested but not available, raise
+        if self.strict and a.kind in {"skill", "tool"} and not self._has_skill(a.name):
+            raise RuntimeError(f"Strict mode: skill/tool '{a.name}' not available.")
 
         if self._has_skill(a.name) or a.kind in {"skill", "tool"}:
             result = self._run_skill(a.name, obs, plan, extra_args=a.args)
@@ -523,6 +625,10 @@ class NoemaCore:
                     meta=meta,
                     raw=raw,
                 )
+
+        # Non-strict fallback execution for basic actions
+        if self.strict:
+            raise RuntimeError(f"Strict mode: execution fallback reached for '{a.name}'.")
 
         meta: Dict[str, Any] = {"plan_intent": intent}
         if decision:
@@ -640,7 +746,8 @@ class NoemaCore:
                     tags=tags,
                 )
             except Exception:
-                pass
+                if self.strict:
+                    raise
         with self.episodes_file.open("a", encoding="utf-8") as f:
             f.write(json.dumps(rec, ensure_ascii=False, default=str) + "\n")
 
@@ -664,7 +771,8 @@ class NoemaCore:
                     ts=tr.ts,
                 )
             except Exception:
-                pass
+                if self.strict:
+                    raise
 
     def _maybe_run_sleep_cycle(self) -> None:
         if self.gws is None or self.sleep_cfg is None or run_sleep_cycle is None:
@@ -676,6 +784,7 @@ class NoemaCore:
             self.last_sleep_report = report
             self.gws.mark_slept()
         except Exception:
+            # Sleep is best-effort even in strict mode
             pass
 
     # ----- One-step loop -----
@@ -689,7 +798,8 @@ class NoemaCore:
                 for vec in self.wm.z_hist(self.state_window - 1):
                     z_hist.append(Latent(list(vec)))
             except Exception:
-                pass
+                if self.strict:
+                    raise
         z_hist.append(z)
 
         s = self.state(z_hist)
@@ -715,6 +825,8 @@ class NoemaCore:
                     elif isinstance(focus_obj, dict):
                         focus_dict = dict(focus_obj)
             except Exception:
+                if self.strict:
+                    raise
                 focus_dict = None
         self.last_focus = focus_dict
 
@@ -752,6 +864,8 @@ class NoemaCore:
                     method=self.decision_method,
                 )
             except Exception:
+                if self.strict:
+                    raise
                 decision_details = []
         else:
             scores: List[Tuple[float, Action]] = []
@@ -792,6 +906,8 @@ class NoemaCore:
                 )
                 r_total = shape(base, confidence=conf1, u_hat=u_hat, spec=self.reward_spec)
             except Exception:
+                if self.strict:
+                    raise
                 r_total = self.w_int * r_int + self.w_ext * r_ext - 0.3 * u_hat
         else:
             r_total = self.w_int * r_int + self.w_ext * r_ext - 0.3 * u_hat
@@ -826,7 +942,8 @@ class NoemaCore:
                 outcome.meta.setdefault("focus", focus_dict)
                 outcome.meta.setdefault("gws_mode", focus_dict.get("mode"))
             except Exception:
-                pass
+                if self.strict:
+                    raise
         pkt = RewardPkt(
             r_int=r_int, r_ext=r_ext, r_total=r_total, risk=risk_hat, energy=energy_cost
         )
@@ -854,8 +971,14 @@ class NoemaCore:
 
 # ========= CLI loop =========
 def main():
-    core = NoemaCore()
-    print("NOEMA V0 — Ready. (Ctrl+C to exit)\n")
+    import argparse
+    p = argparse.ArgumentParser()
+    p.add_argument("--strict", action="store_true", help="Require all modules; disable fallbacks.")
+    p.add_argument("--log-dir", type=str, default="logs", help="Logs directory (default: logs)")
+    args = p.parse_args()
+
+    core = NoemaCore(log_dir=args.log_dir, strict=args.strict)
+    print(f"NOEMA V0 — Ready. Strict: {args.strict}  (Ctrl+C to exit)\n")
     while True:
         try:
             text = input("User: ").strip()
@@ -878,6 +1001,9 @@ def main():
             break
         except Exception as e:
             print("Error:", e, file=sys.stderr)
+            if args.strict:
+                # in strict mode, fail fast
+                break
 
 
 if __name__ == "__main__":
