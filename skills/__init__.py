@@ -159,10 +159,14 @@ class SkillRegistry:
 
 # ----------------------------- Convenience -----------------------------
 
-def load_skills(path: str | Path = "skills/manifest.yaml") -> SkillRegistry:
+def load_skills(path: str | Path = None) -> SkillRegistry:
+    from pathlib import Path
     reg = SkillRegistry()
-    reg.load_manifest(path)
+    if path is None:
+        path = Path(__file__).parent / "manifest.yaml"
+    reg.load_manifest(str(path))
     return reg
+
 
 
 def run_skill(registry: SkillRegistry, name: str, /, *args, **kwargs) -> Dict[str, Any]:

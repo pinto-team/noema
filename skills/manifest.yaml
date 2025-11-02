@@ -29,6 +29,20 @@ skills:
     cost: 0.05
     enabled: true
 
+  - name: ask_clarify
+    kind: skill
+    desc: "Politely ask the user to clarify the goal"
+    entry: "skills.ask_clarify:run"
+    tags: [ "core", "safety" ]
+    allowed_args:
+      hint: { type: "str", optional: true, max_len: 16 }
+      reason: { type: "str", optional: true, max_len: 160 }
+      examples: { type: "list[str]", optional: true, max: 3 }
+    cost: 0.03
+    enabled: true
+
+
+
   # Tool: prefer calling via toolhub. SkillRegistry.run will raise NotImplementedError.
   - name: invoke_calc
     kind: tool
@@ -43,3 +57,5 @@ skills:
         max_len: 256
     cost: 0.05
     enabled: true
+
+

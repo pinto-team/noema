@@ -831,8 +831,6 @@ class NoemaCore:
         self.last_focus = focus_dict
 
         cands = self.generate_candidates(s, plan) or []
-        if focus_dict and focus_dict.get("mode") == "clarify-first":
-            cands.insert(0, Action(kind="policy", name="ask_clarify", args={}))
         filtered: List[Action] = []
         for cand in cands:
             allow, patch = self.safety_check(s, cand)
