@@ -160,13 +160,30 @@ class SkillRegistry:
 # ----------------------------- Convenience -----------------------------
 
 def load_skills(path: str | Path = None) -> SkillRegistry:
+    """Load all skills from manifest.yaml (safe absolute path)."""
     from pathlib import Path
+
     reg = SkillRegistry()
+
+    # اگر مسیر داده نشده، از محل فایل فعلی استفاده کن
     if path is None:
         path = Path(__file__).parent / "manifest.yaml"
-    reg.load_manifest(str(path))
-    return reg
+    else:
+        path = Path(path)
 
+    # اطمینان از مسیر مطلق و وجود فایل
+    path = path.resolve()
+    if not path.exists():
+        print(f"[skills] manifest not found at: {path}")
+        return reg
+
+    try:
+        count = reg.load_manifest(str(path))
+        print(f"[skills] loaded {count} skills from {path}")
+    except Exception as e:
+        print(f"[skills] manifest load error: {e}")
+
+    return reg
 
 
 def run_skill(registry: SkillRegistry, name: str, /, *args, **kwargs) -> Dict[str, Any]:
