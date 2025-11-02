@@ -1,11 +1,10 @@
 # NOEMA • config/safety.yaml
-# قواعد ایمنی/قیود برای سپر زمان‌اجرا (safety/*)
-# ساختار هر policy با safety/dsl.py سازگار است.
+# Runtime safety policies for the shield (safety/*).
 
 policies:
 
   - id: "deny_shell"
-    desc: "جلوگیری از اجرای هرگونه شِل/دستور سیستم"
+    desc: "Block direct shell/OS command execution."
     when:
       actions: ["run_shell", "call_os", "exec_command"]
       text_matches:
@@ -13,35 +12,24 @@ policies:
           - '(?i)\b(?:bash|sh|zsh|rm\s+-rf|powershell|cmd\.exe|del\s+/f)\b'
     effect: "block"
     risk_delta: 0.6
-    message: "اجرای دستور شل/سیستمی مجاز نیست."
+    message: "Shell/OS command execution is not allowed."
 
-  - id: "math_safe"
-    desc: "ماشین‌حساب امن (فقط ۰-۹، + - * /، پرانتز و فاصله/تب)"
+  - id: "ask_for_clarification_low_conf"
+    desc: "If confidence is low or uncertainty is high, ask to clarify."
     when:
-      actions: ["invoke_calc"]
-      text_matches:
-        allow:
-          - '^[0-9\u06F0-\u06F9\u0660-\u0669+\-*/()\t ]+$'  # اجازهٔ ارقام فارسی/عربی برای محاسبه
-    effect: "allow"
-    risk_delta: -0.2
-
-  - id: "unknown_high_u"
-    desc: "اگر نیت نامشخص و اعتماد پایین بود → مرور/شفاف‌سازی"
-    when:
-      intents: ["unknown"]
-      max_conf: 0.5     # اگر confidence ≤ 0.5  (یا u ≥ ~0.5)
+      intents: ["unknown", "smalltalk"]
     effect: "review"
     risk_delta: 0.2
-    message: "لطفاً واضح‌تر بگویید چه می‌خواهید."
+    message: "Please clarify what you would like me to do."
 
   - id: "compute_invalid_expr"
-    desc: "در حالت compute، اگر عبارت نامعتبر به‌نظر برسد → مرور"
+    desc: "When intent is compute, if expression looks invalid → review."
     when:
       intents: ["compute"]
       text_matches:
         deny:
-          # اگر کاراکتری خارج از مجموعهٔ مجاز بیاید (برای راهنمایی/clarify)
-          - '[^0-9\u06F0-\u06F9\u0660-\u0669+\-*/()\t ]'  # اجازهٔ ارقام فارسی/عربی برای محاسبه
+          # Disallow any char outside the safe set. Arabic-Indic digits are accepted for convenience.
+          - '[^0-9\u06F0-\u06F9\u0660-\u0669+\-*/()\t ]'
     effect: "review"
     risk_delta: 0.1
-    message: "عبارت ریاضی نامعتبر است؛ لطفاً فقط اعداد و + - * / و پرانتز استفاده کنید."
+    message: "Invalid math expression. Please use only numbers and + - * / and parentheses."

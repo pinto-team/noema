@@ -1,7 +1,5 @@
 # -*- coding: utf-8 -*-
 """
-NOEMA • value package
-- سیگنال‌های ارزش/پاداش و شکل‌دهی آن‌ها.
 
 استفاده:
     from value import RewardSpec, get_default_spec

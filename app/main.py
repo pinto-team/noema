@@ -1,38 +1,45 @@
 # -*- coding: utf-8 -*-
 """
-NOEMA • app/main.py  —  مینیمال‌ترین حلقه‌ی اجرا برای V0
-- این فایل مستقل اجرا می‌شود (بدون وابستگی به بقیه‌ی ماژول‌ها).
-- اگر بعداً ماژول‌های تخصصی را ساختید (perception/world/…)، خودکار از آنها استفاده می‌کند.
-- فعلاً دو توانمندی پایه دارد: پاسخ سلام و محاسبه‌ی ساده با ابزار داخلی + راستی‌آزمایی.
-- TODOها را یکی‌یکی با فایل‌های شماره‌دار دیگر جایگزین کنید.
+NOEMA • app/main.py — Minimal execution loop for V0
+
+- Self-contained: runs even if optional modules are missing.
+- Tries to import real modules (perception/world/lang/control/...) when available.
+- Provides two baseline capabilities out of the box: greeting reply and safe arithmetic.
+- All comments/strings are English; no language-specific dependency is required.
 """
+
 from __future__ import annotations
-from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional, Tuple
-from time import time
-import math
-import re
+
 import json
-import sys
+import math
 import pathlib
 import random
+import re
+import sys
+from dataclasses import dataclass, field
+from time import time
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
-# حافظه‌ی کاری اختیاری
+# Optional working memory
 try:
     from memory.wm import WorkingMemory  # type: ignore
 except Exception:
     WorkingMemory = None  # type: ignore
 
-# ========= انواع داده‌ی مینیمال =========
+
+# ========= Minimal data types =========
 @dataclass
 class Observation:
     t: float
     modality: str
     payload: str
 
-try:  # تلاش برای استفاده از world.* در صورت موجود بودن
+
+# Try importing world.*; otherwise fall back to light stubs
+try:
     from world import Latent, State, Action  # type: ignore
-except Exception:  # fallback مینیمال
+except Exception:
+
     @dataclass
     class Latent:
         z: List[float]
@@ -40,14 +47,15 @@ except Exception:  # fallback مینیمال
     @dataclass
     class State:
         s: List[float]
-        u: float = 0.0   # uncertainty
+        u: float = 0.0  # uncertainty
         conf: float = 0.0
 
     @dataclass
     class Action:
-        kind: str               # "skill" | "tool" | "policy"
-        name: str               # e.g. "reply_greeting" | "invoke_calc"
+        kind: str  # "skill" | "tool" | "policy"
+        name: str  # e.g., "reply_greeting" | "invoke_calc"
         args: Dict[str, Any] = field(default_factory=dict)
+
 
 @dataclass
 class RewardPkt:
@@ -57,14 +65,18 @@ class RewardPkt:
     risk: float
     energy: float
 
+
 @dataclass
 class Outcome:
     text_out: Optional[str] = None
     tests: List[Dict[str, Any]] = field(default_factory=list)
-    costs: Dict[str, Any] = field(default_factory=lambda: {"latency_ms": 0, "compute": 0})
+    costs: Dict[str, Any] = field(
+        default_factory=lambda: {"latency_ms": 0, "compute": 0}
+    )
     risk: float = 0.0
     meta: Dict[str, Any] = field(default_factory=dict)
     raw: Dict[str, Any] = field(default_factory=dict)
+
 
 @dataclass
 class Transition:
@@ -77,52 +89,74 @@ class Transition:
     plan: Dict[str, Any] = field(default_factory=dict)
     text_in: str = ""
 
-# ========= کمک‌های داخلی (fallback) =========
+
+# ========= Lightweight helpers (fallback) =========
 def _soft_hash(text: str, d: int = 32) -> List[float]:
-    """بردار سبک و پایدار از متن؛ صرفاً برای V0. با encoder واقعی جایگزین می‌شود."""
+    """Create a stable lightweight vector from text (placeholder encoder for V0)."""
     random.seed(0)
-    v = [0.0]*d
-    for i,ch in enumerate(text):
+    v = [0.0] * d
+    for i, ch in enumerate(text):
         v[i % d] += (ord(ch) % 23) / 23.0
-    # نرمال‌سازی
-    n = math.sqrt(sum(x*x for x in v)) or 1.0
-    return [x/n for x in v]
+    n = math.sqrt(sum(x * x for x in v)) or 1.0
+    return [x / n for x in v]
+
 
 def _calc_safe(expr: str) -> Tuple[bool, str]:
-    """ماشین‌حساب بسیار ساده و امن (فقط 0-9 + - * / ( ) و فاصله)."""
+    """Extremely safe arithmetic: only [0-9 + - * / ( ) whitespace]."""
     if not re.fullmatch(r"[0-9+\-*/() \t]+", expr):
         return False, "invalid"
     try:
-        # ارزیابی امن: فقط عملگرهای مجاز
         val = eval(expr, {"__builtins__": None}, {})
         return True, str(val)
     except Exception:
         return False, "error"
 
+
 def _is_greeting(text: str) -> bool:
-    t = text.strip().lower()
-    return any(w in t for w in ["سلام", "درود", "hi", "hello", "hey"])
+    """
+    Language-agnostic heuristic for greetings (fallback only).
+    Prefer dedicated NLP in lang.parse when available.
+    """
+    t = (text or "").strip().lower()
+    # A small multilingual (latin-script) set; no language-specific Unicode words here.
+    tokens = (
+        "hi",
+        "hello",
+        "hey",
+        "hola",
+        "hallo",
+        "ciao",
+        "salut",
+        "bonjour",
+        "namaste",
+        "ola",
+        "hei",
+    )
+    # If text is short and contains a common greeting token, treat as greeting.
+    return any(tok in t for tok in tokens) and len(t) <= 40
+
 
 def _current_ts() -> float:
     return time()
 
-# ========= تلاش برای بارگذاری ماژول‌های واقعی (اختیاری) =========
+
+# ========= Best-effort import helper =========
 def _try_import(module: str, attr: Optional[str] = None):
     try:
-        m = __import__(module, fromlist=['*'])
+        m = __import__(module, fromlist=["*"])
         return getattr(m, attr) if attr else m
     except Exception:
         return None
 
-# ========= هسته‌ی مینیمال نوما =========
 
+# ========= NOEMA Core =========
 class NoemaCore:
     def __init__(self, log_dir: str = "logs"):
         self.log_dir = pathlib.Path(log_dir)
         self.log_dir.mkdir(parents=True, exist_ok=True)
         self.episodes_file = self.log_dir / "episodes.jsonl"
 
-        # پیکربندی پایه
+        # Basic energy costs per action (approximate)
         self.energy_costs: Dict[str, float] = {
             "reply_greeting": 0.02,
             "invoke_calc": 0.05,
@@ -131,14 +165,14 @@ class NoemaCore:
         self.state_window = 6
         self.decision_method = "argmax"
 
-        # وزن‌های اولیه‌ی پاداش
+        # Reward weighting
         self.w_int = 0.2
         self.w_ext = 0.8
 
-        # EMA خطای پیش‌بینی (برای r_int)
+        # EMA of prediction error for intrinsic reward
         self._ema_err_prev = 1.0
 
-        # بارگذاری اختیاری توابع کلیدی
+        # Optional modules
         self.modules: Dict[str, Any] = {
             "encode": _try_import("perception.encoder", "encode"),
             "state": _try_import("world", "state"),
@@ -195,7 +229,9 @@ class NoemaCore:
                 names_for_fallback.extend(self.skills.list_all())
             except Exception:
                 pass
-        names_for_fallback.extend(["reply_greeting", "invoke_calc", "reply_smalltalk", "reply_from_memory"])
+        names_for_fallback.extend(
+            ["reply_greeting", "invoke_calc", "reply_smalltalk", "reply_from_memory"]
+        )
         self.skill_fallbacks: Dict[str, Callable[..., Dict[str, Any]]] = {}
         for name in dict.fromkeys(names_for_fallback):
             fn = _try_import(f"skills.{name}", "run")
@@ -210,7 +246,7 @@ class NoemaCore:
         self.last_plan: Dict[str, Any] = {}
         self.last_reward: Optional[RewardPkt] = None
 
-    # ----- ابزارهای کمکی -----
+    # ----- Cost estimation -----
     def _estimate_compute_cost(self, action_name: str) -> int:
         energy = float(self.energy_costs.get(action_name, 0.04))
         return max(1, int(round(energy * 50)))
@@ -241,12 +277,14 @@ class NoemaCore:
         plan_args = dict((plan or {}).get("args", {}) or {})
         for key, value in plan_args.items():
             params.setdefault(key, value)
+
         has_registry = False
         if self.skills is not None:
             try:
                 has_registry = self.skills.has(name)
             except Exception:
                 has_registry = False
+
         if has_registry:
             try:
                 return self.skills.run(name, **params)
@@ -254,6 +292,7 @@ class NoemaCore:
                 pass
             except Exception as exc:
                 return {"error": str(exc)}
+
         fn = self.skill_fallbacks.get(name)
         if callable(fn):
             try:
@@ -262,7 +301,7 @@ class NoemaCore:
                 return {"error": str(exc)}
         return None
 
-    # ----- بلوک 1: ادراک -----
+    # ----- Block 1: Perception/encoding -----
     def encode(self, text: str) -> Latent:
         fn = self.modules.get("encode")
         if callable(fn):
@@ -272,7 +311,7 @@ class NoemaCore:
                 pass
         return Latent(_soft_hash(text))
 
-    # ----- بلوک 2: وضعیت/پیش‌بینی -----
+    # ----- Block 2: State/prediction -----
     def state(self, z_hist: List[Latent]) -> State:
         if not z_hist:
             return State(s=[], u=1.0, conf=0.0)
@@ -296,7 +335,7 @@ class NoemaCore:
         rhat = 0.5 if a.name in ["reply_greeting", "invoke_calc"] else 0.1
         return s, Latent(s.s), rhat, risk, u_hat
 
-    # ----- بلوک 7: پارس نیت و پلان -----
+    # ----- Block 7: Intent parsing -----
     def parse_intent(self, text: str) -> Dict[str, Any]:
         parse_fn = self.modules.get("parse")
         if callable(parse_fn):
@@ -306,6 +345,7 @@ class NoemaCore:
                     return plan
             except Exception:
                 pass
+
         detect_fn = self.modules.get("detect_intent")
         if callable(detect_fn):
             try:
@@ -314,25 +354,35 @@ class NoemaCore:
                     return plan
             except Exception:
                 pass
+
+        # Fallback parsing (language-agnostic heuristics)
         fa_digits = str.maketrans("۰۱۲۳۴۵۶۷۸۹", "0123456789")
         ar_digits = str.maketrans("٠١٢٣٤٥٦٧٨٩", "0123456789")
         ascii_math = (
-            text.translate(fa_digits).translate(ar_digits)
+            text.translate(fa_digits)
+            .translate(ar_digits)
             .replace("×", "*")
             .replace("÷", "/")
             .replace("−", "-")
             .replace("–", "-")
             .replace("—", "-")
         )
+
         if _is_greeting(text):
             return {"intent": "greeting", "args": {}, "confidence": 0.9}
+
         m = re.search(r"([0-9+\-*/() \t]+)", ascii_math)
         if m:
             expr = m.group(1)
-            return {"intent": "compute", "args": {"expr": expr, "raw": text}, "confidence": 0.82}
+            return {
+                "intent": "compute",
+                "args": {"expr": expr, "raw": text},
+                "confidence": 0.82,
+            }
+
         return {"intent": "smalltalk", "args": {"raw": text}, "confidence": 0.6}
 
-    # ----- بلوک 6: تولید نامزدها -----
+    # ----- Block 6: Candidate generation -----
     def generate_candidates(self, s: State, plan: Dict[str, Any]) -> List[Action]:
         fn = self.modules.get("candidates")
         if callable(fn):
@@ -342,6 +392,7 @@ class NoemaCore:
                 return list(fn(s, plan))
             except Exception:
                 pass
+
         intent = plan.get("intent")
         args = dict((plan.get("args") or {}) or {})
         if intent == "greeting":
@@ -354,7 +405,7 @@ class NoemaCore:
             return [Action(kind="skill", name="reply_smalltalk", args={})]
         return [Action(kind="skill", name="reply_from_memory", args={})]
 
-    # ----- بلوک 10: سپر ایمنی -----
+    # ----- Block 10: Safety -----
     def safety_check(self, s: State, a: Action) -> Tuple[bool, Dict[str, Any]]:
         shield_fn = self.modules.get("shield")
         if callable(shield_fn):
@@ -365,12 +416,13 @@ class NoemaCore:
                 pass
         return True, {}
 
-    # ----- بلوک 5/8: ارزش و متا -----
+    # ----- Block 5/8: Value & meta -----
     def learning_progress(self, z_real: Latent, z_pred: Latent) -> float:
         real = list(z_real.z or [])
         pred = list(z_pred.z or [])
         if not real or not pred:
             return 0.0
+
         err_now = sum((ri - pi) ** 2 for ri, pi in zip(real, pred)) / float(len(real))
         intrinsic = self.modules.get("reward_intrinsic")
         if callable(intrinsic):
@@ -380,12 +432,13 @@ class NoemaCore:
                 return float(r_int)
             except Exception:
                 pass
+
         ema = 0.9 * self._ema_err_prev + 0.1 * err_now
         r_int = max(0.0, self._ema_err_prev - ema)
         self._ema_err_prev = ema
         return r_int
 
-    # ----- اجرای عمل (skill/tool/policy) -----
+    # ----- Execution (skill/tool/policy) -----
     def execute(
         self,
         a: Action,
@@ -397,6 +450,7 @@ class NoemaCore:
         compute_cost = self._estimate_compute_cost(a.name)
         decision = decision or {}
         intent = plan.get("intent", "unknown")
+
         if self._has_skill(a.name) or a.kind in {"skill", "tool"}:
             result = self._run_skill(a.name, obs, plan, extra_args=a.args)
             if isinstance(result, dict):
@@ -408,7 +462,7 @@ class NoemaCore:
                 raw = result
                 text_out = str(result.get("text_out") or result.get("output") or "")
                 if not text_out and result.get("error"):
-                    text_out = f"خطا در اجرای مهارت: {result['error']}"
+                    text_out = f"Error executing skill: {result['error']}"
                 tests: List[Dict[str, Any]] = []
                 if isinstance(result.get("tests"), list):
                     tests.extend(result["tests"])
@@ -420,7 +474,7 @@ class NoemaCore:
                 risk = float(meta.get("risk", 0.0))
                 latency_ms = int((time() - t0) * 1000)
                 return Outcome(
-                    text_out=text_out or "نامشخص",
+                    text_out=text_out or "unknown",
                     tests=tests,
                     costs={"latency_ms": latency_ms, "compute": compute_cost},
                     risk=risk,
@@ -434,8 +488,9 @@ class NoemaCore:
         tests: List[Dict[str, Any]] = []
         raw: Dict[str, Any] = {"action": a.name, "fallback": True}
         risk = 0.0
+
         if a.name == "reply_greeting":
-            text_out = "سلام! خوش اومدی 👋"
+            text_out = "Hello!"
             meta.setdefault("confidence", 0.9)
             tests.append({"name": "style", "pass": True})
         elif a.name == "invoke_calc":
@@ -445,20 +500,21 @@ class NoemaCore:
             if not expr:
                 expr = (plan.get("args") or {}).get("expr")
             ok, res = _calc_safe(str(expr or ""))
-            text_out = res if ok else "نامشخص"
+            text_out = res if ok else "unknown"
             tests.append({"name": "safe_eval", "pass": ok})
             meta.setdefault("confidence", 0.82 if ok else 0.5)
             if not ok:
                 meta["error"] = "invalid_expr"
         elif a.name == "ask_clarify":
-            text_out = "منظورت مشخص نیست؛ لطفاً دقیق‌تر بگو چه می‌خواهی 😊"
+            text_out = "Please clarify your intent."
             meta.setdefault("confidence", 0.55)
             meta.setdefault("u", 0.35)
             tests.append({"name": "clarify", "pass": True})
         else:
-            text_out = "نامشخص"
+            text_out = "unknown"
             meta.setdefault("confidence", 0.4)
             tests.append({"name": "noop", "pass": True})
+
         latency_ms = int((time() - t0) * 1000)
         return Outcome(
             text_out=text_out,
@@ -469,7 +525,7 @@ class NoemaCore:
             raw=raw,
         )
 
-    # ----- حافظه/لاگ -----
+    # ----- Memory/logging -----
     def write_memory(self, tr: Transition) -> None:
         rec = {
             "ts": tr.ts,
@@ -495,24 +551,34 @@ class NoemaCore:
             rec["outcome"]["raw"] = tr.outcome.raw
         with self.episodes_file.open("a", encoding="utf-8") as f:
             f.write(json.dumps(rec, ensure_ascii=False, default=str) + "\n")
+
         if self.wm is not None:
             try:
                 self.wm.push(
                     z=list(tr.z.z),
                     s=list(tr.s.s),
-                    action={"kind": tr.a.kind, "name": tr.a.name, "args": dict(tr.a.args or {})},
+                    action={
+                        "kind": tr.a.kind,
+                        "name": tr.a.name,
+                        "args": dict(tr.a.args or {}),
+                    },
                     outcome={"text_out": tr.outcome.text_out, "meta": tr.outcome.meta},
-                    reward={"r_total": tr.reward.r_total, "r_int": tr.reward.r_int, "r_ext": tr.reward.r_ext},
+                    reward={
+                        "r_total": tr.reward.r_total,
+                        "r_int": tr.reward.r_int,
+                        "r_ext": tr.reward.r_ext,
+                    },
                     text_in=tr.text_in,
                     ts=tr.ts,
                 )
             except Exception:
                 pass
 
-    # ----- چرخه‌ی یک گام -----
+    # ----- One-step loop -----
     def step(self, text_in: str, r_ext: float = 0.0) -> str:
         obs = Observation(t=_current_ts(), modality="text", payload=text_in)
         z = self.encode(obs.payload)
+
         z_hist: List[Latent] = []
         if self.wm is not None:
             try:
@@ -521,8 +587,8 @@ class NoemaCore:
             except Exception:
                 pass
         z_hist.append(z)
-        s = self.state(z_hist)
 
+        s = self.state(z_hist)
         plan = self.parse_intent(obs.payload)
         if not isinstance(plan.get("args"), dict):
             plan["args"] = {}
@@ -547,6 +613,7 @@ class NoemaCore:
         policy_decide = self.modules.get("policy_decide")
         decision_details: List[Dict[str, Any]] = []
         a_star = filtered[0]
+
         if callable(policy_decide):
             try:
                 a_star, decision_details = policy_decide(
@@ -572,7 +639,11 @@ class NoemaCore:
                 a_star = scores[0][1]
                 decision_details = [
                     {
-                        "action": {"kind": cand.kind, "name": cand.name, "args": cand.args},
+                        "action": {
+                            "kind": cand.kind,
+                            "name": cand.name,
+                            "args": cand.args,
+                        },
                         "shaped": score,
                     }
                     for score, cand in scores[:3]
@@ -590,7 +661,9 @@ class NoemaCore:
         shape = self.modules.get("reward_shape")
         if callable(combine) and callable(shape) and self.reward_spec is not None:
             try:
-                base = combine(r_int=r_int, r_ext=r_ext, risk=risk_hat, energy=energy_cost, spec=self.reward_spec)
+                base = combine(
+                    r_int=r_int, r_ext=r_ext, risk=risk_hat, energy=energy_cost, spec=self.reward_spec
+                )
                 r_total = shape(base, confidence=conf1, u_hat=u_hat, spec=self.reward_spec)
             except Exception:
                 r_total = self.w_int * r_int + self.w_ext * r_ext - 0.3 * u_hat
@@ -620,7 +693,9 @@ class NoemaCore:
             ]
 
         outcome = self.execute(a_star, obs, plan, decision=decision_meta)
-        pkt = RewardPkt(r_int=r_int, r_ext=r_ext, r_total=r_total, risk=risk_hat, energy=energy_cost)
+        pkt = RewardPkt(
+            r_int=r_int, r_ext=r_ext, r_total=r_total, risk=risk_hat, energy=energy_cost
+        )
         transition = Transition(
             s=s,
             z=z,
@@ -640,32 +715,34 @@ class NoemaCore:
         self.last_decision = decision_meta
         return outcome.text_out or ""
 
-# ========= اجرای تعاملی کنسول =========
+
+# ========= CLI loop =========
 def main():
     core = NoemaCore()
-    print("NOEMA V0 — آماده. (برای خروج Ctrl+C)\n")
+    print("NOEMA V0 — Ready. (Ctrl+C to exit)\n")
     while True:
         try:
-            text = input("شما: ").strip()
+            text = input("User: ").strip()
             if not text:
                 continue
-            # مربی اگر خواست پاداش سریع بدهد: +1 / 0 / -1 داخل براکت آخر پیام
-            # مثال: "سلام [+1]"
+            # Optional inline reward for previous response: +1 / 0 / -1 in square brackets at the end
+            # Example: "Hello [+1]"
             m = re.search(r"\[([+\-]?\d+)\]$", text)
             r_ext = 0.0
             if m:
                 try:
                     r_ext = float(m.group(1))
-                    text = text[:m.start()].strip()
+                    text = text[: m.start()].strip()
                 except Exception:
                     pass
             reply = core.step(text, r_ext=r_ext)
-            print("نوما:", reply)
+            print("Noema:", reply)
         except KeyboardInterrupt:
-            print("\nخروج.")
+            print("\nExit.")
             break
         except Exception as e:
-            print("خطا:", e, file=sys.stderr)
+            print("Error:", e, file=sys.stderr)
+
 
 if __name__ == "__main__":
     main()

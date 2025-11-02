@@ -1,38 +1,31 @@
 # -*- coding: utf-8 -*-
 """
 NOEMA • skills package (V0)
-- بارگذاری «مهارت‌ها» از skills/manifest.yaml و اجرای آن‌ها به‌صورت پویا.
-- طراحی سبک، بدون وابستگی سنگین؛ YAML اختیاری.
 
-کارکردها:
-    reg = load_skills("skills/manifest.yaml")
-    out = reg.run("reply_greeting", user_text="سلام")
-
-    # میان‌بُرها:
-    reg = load_skills()                 # مسیر پیش‌فرض
-    out = run_skill(reg, "reply_greeting", user_text="سلام")
-
-یادداشت‌ها:
-- برای مهارت‌های نوع tool (مثل invoke_calc) ممکن است entry خالی باشد و
-  اجرا از طریق toolhub انجام شود. در این حالت reg.run روی آن مهارت خطای
-  NotImplementedError می‌دهد (انتظار می‌رود لایه‌ی app از toolhub استفاده کند).
+Lightweight dynamic loader/runner for skills defined in `skills/manifest.yaml`.
+- Minimal design, optional YAML support.
+- For tools (kind: tool) with no Python entry, the app layer should invoke them
+  via toolhub; calling `registry.run(...)` on such items will raise
+  NotImplementedError.
 """
 
 from __future__ import annotations
+
 from dataclasses import dataclass, field, asdict
-from typing import Any, Callable, Dict, List, Optional, Tuple
 from pathlib import Path
+from typing import Any, Callable, Dict, List, Optional
+
 import importlib
 import json
 
-# YAML اختیاری
 try:
     import yaml  # type: ignore
     _HAS_YAML = True
 except Exception:
     _HAS_YAML = False
 
-# ───────────────────────────── داده/تعریف ─────────────────────────────
+
+# ----------------------------- Data model -----------------------------
 
 @dataclass
 class SkillSpec:
@@ -45,7 +38,7 @@ class SkillSpec:
     cost: float = 0.0
     enabled: bool = True
 
-    # بایند اجرا (در فایل ذخیره نمی‌شود)
+    # Bound callable (not serialized)
     _fn: Optional[Callable[..., Dict[str, Any]]] = field(default=None, repr=False, compare=False)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -67,13 +60,14 @@ class SkillSpec:
         data["enabled"] = bool(data.get("enabled", True))
         return cls(**data)
 
-# ───────────────────────────── رجیستری ─────────────────────────────
+
+# ----------------------------- Registry -----------------------------
 
 class SkillRegistry:
-    def __init__(self):
+    def __init__(self) -> None:
         self._specs: Dict[str, SkillSpec] = {}
 
-    # ثبت/حذف
+    # Register / remove
     def register(self, spec: SkillSpec, fn: Optional[Callable[..., Dict[str, Any]]] = None) -> None:
         if fn is not None:
             spec._fn = fn
@@ -82,7 +76,7 @@ class SkillRegistry:
     def remove(self, name: str) -> None:
         self._specs.pop(name, None)
 
-    # دسترسی
+    # Introspection
     def has(self, name: str) -> bool:
         return name in self._specs and self._specs[name].enabled
 
@@ -93,19 +87,19 @@ class SkillRegistry:
     def list_all(self) -> List[str]:
         return sorted([n for n, s in self._specs.items() if s.enabled])
 
-    # بایند
+    # Bind a callable to a skill
     def bind(self, name: str, fn: Callable[..., Dict[str, Any]]) -> None:
         if name not in self._specs:
             self._specs[name] = SkillSpec(name=name, desc="(auto-registered)")
         self._specs[name]._fn = fn
 
-    # بارگذاری از manifest
+    # Load from manifest
     def load_manifest(self, path: str | Path = "skills/manifest.yaml") -> int:
         p = Path(path)
         if not p.exists():
             return 0
         text = p.read_text(encoding="utf-8")
-        data = {}
+        data: Dict[str, Any] = {}
         if _HAS_YAML:
             try:
                 data = yaml.safe_load(text) or {}
@@ -116,6 +110,7 @@ class SkillRegistry:
                 data = json.loads(text)
             except Exception:
                 data = {}
+
         n = 0
         for obj in (data.get("skills") or []):
             try:
@@ -126,12 +121,10 @@ class SkillRegistry:
                 continue
         return n
 
-    # Resolve entry → تابع
+    # Resolve entry string -> callable
     @staticmethod
     def _resolve_entry(entry: str) -> Callable[..., Dict[str, Any]]:
-        """
-        entry شبیه "pkg.module:func" را به تابع پایتون تبدیل می‌کند.
-        """
+        """Resolve an entry like "pkg.module:func" to a Python callable."""
         mod_name, _, func_name = entry.partition(":")
         if not mod_name or not func_name:
             raise ValueError(f"invalid entry spec: {entry!r}")
@@ -141,11 +134,13 @@ class SkillRegistry:
             raise TypeError(f"entry is not callable: {entry!r}")
         return fn
 
-    # اجرا
+    # Execute
     def run(self, name: str, /, *args, **kwargs) -> Dict[str, Any]:
-        """
-        مهارت name را اجرا می‌کند و dict خروجی را برمی‌گرداند.
-        اگر entry/bind موجود نباشد → NotImplementedError.
+        """Run a skill by name and return its dict output.
+
+        Raises:
+            KeyError:    if skill is not found or disabled
+            NotImplementedError: if no bound function or entry is available
         """
         spec = self.get(name)
         if spec is None:
@@ -154,31 +149,32 @@ class SkillRegistry:
         fn = spec._fn
         if fn is None and spec.entry:
             fn = self._resolve_entry(spec.entry)
-            # cache بعد از resolve
-            spec._fn = fn
+            spec._fn = fn  # cache after resolve
 
         if fn is None:
             raise NotImplementedError(f"skill '{name}' has no bound function or entry")
 
         return fn(*args, **kwargs)
 
-# ───────────────────────────── سازنده‌های سطح‌بالا ─────────────────────────────
+
+# ----------------------------- Convenience -----------------------------
 
 def load_skills(path: str | Path = "skills/manifest.yaml") -> SkillRegistry:
     reg = SkillRegistry()
     reg.load_manifest(path)
     return reg
 
+
 def run_skill(registry: SkillRegistry, name: str, /, *args, **kwargs) -> Dict[str, Any]:
     return registry.run(name, *args, **kwargs)
 
-# ───────────────────────────── تست سریع ─────────────────────────────
+
+# ----------------------------- Quick self-test -----------------------------
 
 if __name__ == "__main__":
     reg = load_skills()
-    # اگر reply_greeting در manifest تعریف شده باشد و entry داشته باشد، اجرا می‌شود
     if reg.has("reply_greeting"):
-        out = reg.run("reply_greeting", user_text="سلام", plan={"intent":"greeting"})
+        out = reg.run("reply_greeting", user_text="Hello", plan={"intent": "greeting"})
         print(out.get("text_out"))
     else:
         print("no reply_greeting in manifest")

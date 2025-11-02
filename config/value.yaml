@@ -1,25 +1,20 @@
 # NOEMA • config/value.yaml
-# وزن‌دهی ارزش/پاداش برای کنترل‌گر (control/*)
-# این کلیدها با RewardSpec در control/policy.py هم‌نام‌اند.
+# Reward/Value weights for the controller (used by value/reward.py).
 
-# وزن پاداش بیرونی (بازخورد مربی: r_ext ∈ [-1, +1])
+# External reward weight (coach/environment: r_ext ∈ [-1, +1])
 w_ext: 1.0
 
-# وزن پاداش درونی (کنجکاوی/پیشرفت مدل جهان)
+# Intrinsic reward weight (learning progress / curiosity)
 w_int: 0.6
 
-# جریمه‌ی ریسک (risk ∈ [0,1]) — هرچه بزرگ‌تر، محافظه‌کارتر
-lambda_risk: 0.5
+# Penalties
+lambda_risk: 0.5    # weight for risk penalty
+mu_energy: 0.05     # weight for energy/compute penalty
 
-# جریمه‌ی انرژی (هزینه‌ی محاسبات/اقدام ∈ [0,1])
-mu_energy: 0.05
+# Mild shaping (stability)
+conf_bonus: 0.05    # small bonus for calibrated confidence
+u_penalty: 0.05     # small penalty for higher uncertainty
 
-# پاداش ملایم برای اطمینان بالاتر (conf ∈ [0,1])
-conf_bonus: 0.10
-
-# جریمه‌ی ملایم برای عدم‌قطعیت (u ∈ [0,1])
-u_penalty: 0.05
-
-# برش (clip) نهایی امتیاز ارزش
+# Final clipping of shaped reward
 clip_min: -1.0
 clip_max: 1.0

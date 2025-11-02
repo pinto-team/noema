@@ -1,17 +1,17 @@
 # NOEMA • config/tools.yaml
-# رجیستری ابزارها برای toolhub/*
-# می‌توانید بعداً ابزارهای بیشتری اضافه کنید. ساختار با toolhub/registry.py سازگار است.
+# Registry of tools consumed by toolhub/* (see toolhub/registry.py for loader contract).
 
 tools:
   - name: invoke_calc
     kind: tool
-    desc: "ماشین‌حساب امن چهار عمل اصلی"
+    desc: "Safe four-operator calculator"
     safety: safe
     tags: ["basic"]
     allowed_args:
       expr:
         type: "str"
-        regex: "^[0-9\\u06F0-\\u06F9\\u0660-\\u0669+\\-*/()\\t ]+$"  # اجازهٔ ارقام فارسی/عربی برای محاسبه
+        # Allow ASCII digits and Arabic-Indic digit ranges so users can type ۲×۳ as well.
+        regex: "^[0-9\u06F0-\u06F9\u0660-\u0669+\-*/()\t ]+$"
         max_len: 256
     cost: 0.05
     enabled: true

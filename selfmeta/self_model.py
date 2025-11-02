@@ -1,40 +1,14 @@
 # -*- coding: utf-8 -*-
 """
-NOEMA • selfmeta/self_model.py — مدلِ خود (Self-Model) مینیمال V0
-- هدف: نگهداری و به‌روزکردن «وضعیت درونی» نوما به‌صورت یک بردار کم‌بعد.
-- خروجی این ماژول برای:
-    • لاگ اپیزودیک (memory/episodic.py)
-    • تصمیم‌گیری (confidence/uncertainty)
-    • خواب/کالیبراسیون (sleep/*, selfmeta/calibrate.py)
-  استفاده می‌شود.
-
-❖ ایده:
-  self_vector = [
-      energy_level,        # [0..1] بودجه/خستگی محاسباتی
-      confidence,          # [0..1] اعتماد به پاسخ‌های اخیر (برحسب u→conf)
-      surprise_ema,        # [0..1] میانگین متحرک «شگفتی»
-      reward_mean,         # [0..1] میانگین پاداش اخیر (کل/شکل‌داده)
-      risk_ema,            # [0..1] میانگین ریسک مشاهده‌شده
-      uncertainty_ema,     # [0..1] EMA عدم‌قطعیت پیش‌بینی
-      progress_ema,        # [0..1] EMA r_int (پیشرفت یادگیری)
-      temp_free,           # [0..1] نشانگر آزاد/انسداد (در آینده برای قفل‌ها)
-  ]
-
-API اصلی:
-    cfg = SelfModelCfg()
-    sm  = SelfModel(cfg)
-    snap = sm.update(metrics={ "u":0.2, "r_int":0.3, "r_total":0.6, "risk":0.0, "energy":0.05 })
-    vec  = sm.vector()  # لیست 8تایی float
-    conf = sm.confidence()  # اسکالر [0..1]
-
-توجه:
-- این نسخه فقط stdlib را نیاز دارد.
-- کالیبراسیون احتمالات در selfmeta/calibrate.py پیاده‌سازی می‌شود و از این‌جا
-  می‌توان hook آن را صدا زد (اختیاری).
+NOEMA • selfmeta/self_model.py — مدلِ خود (Self-Model) مینیمال V0 (clean)
+- بردار وضعیت درونی 8بُعدی + به‌روزرسانی‌های EMA.
+- اصلاحات:
+  • انرژی: شارژ ملایم به‌سمت 1.0 سپس کسر هزینهٔ گام (به‌جای decay کاهنده).
+  • u→confidence: لاجیت پایدار با pivot/gain قابل‌تنظیم (برای u کم، conf زیاد).
 """
 
 from __future__ import annotations
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass
 from typing import Dict, Any, Optional, List
 import math
 import time
@@ -43,22 +17,22 @@ import time
 
 @dataclass
 class SelfModelCfg:
-    # پنجره‌ی EMA ها
-    alpha_surp: float = 0.9          # EMA شگفتی
-    alpha_reward: float = 0.9        # EMA پاداش
-    alpha_risk: float = 0.9          # EMA ریسک
-    alpha_unc: float = 0.9           # EMA عدم‌قطعیت
-    alpha_prog: float = 0.9          # EMA پیشرفت (r_int)
+    # EMA windows
+    alpha_surp: float = 0.9
+    alpha_reward: float = 0.9
+    alpha_risk: float = 0.9
+    alpha_unc: float = 0.9
+    alpha_prog: float = 0.9
 
-    # نگاشت u→confidence
-    conf_slope: float = 1.15         # شیب
-    conf_bias: float  = 0.05         # بایاس کوچک مثبت
+    # u → confidence (sigmoid on (pivot - u))
+    conf_pivot: float = 0.35      # نقطهٔ تعادل u که اطرافش conf≈0.5
+    conf_gain: float  = 6.0       # تیزی منحنی (بزرگ‌تر = اشباع سریع‌تر)
 
-    # بودجه‌ی انرژی (تقریباً «خستگی» محاسباتی)
-    energy_decay: float = 0.98        # در هر گام کمی شارژ می‌شود (به 1.0 نزدیک)
-    energy_cost_cap: float = 0.25     # سقف هزینهٔ هر گام که لحاظ می‌کنیم
-    energy_floor: float = 0.10        # کف انرژی (هرگز به صفر مطلق نرسد)
-    energy_init: float = 1.00         # مقدار آغازین
+    # انرژی (شارژ به‌سمت 1.0)
+    energy_recharge: float = 0.02 # نرخ شارژ در هر گام (۰..۱)
+    energy_cost_cap: float = 0.25 # سقف هزینهٔ لحاظ‌شده برای هر گام
+    energy_floor: float = 0.10    # کف انرژی
+    energy_init: float = 1.00     # مقدار آغازین
 
 # ───────────────────────────── مدل ─────────────────────────────
 
@@ -71,17 +45,17 @@ class SelfModel:
         self.cfg = cfg or SelfModelCfg()
         # حالت درونی
         self._energy = float(self.cfg.energy_init)   # [0..1]
-        self._conf   = 0.5                           # [0..1] برآورد اولیه
-        self._surp_e = 0.0                           # surprise EMA
-        self._rew_e  = 0.0                           # reward EMA
-        self._risk_e = 0.0                           # risk EMA
-        self._unc_e  = 1.0                           # uncertainty EMA
-        self._prog_e = 0.0                           # r_int EMA
-        self._free   = 1.0                           # «آزاد بودن» (رزرو برای آینده)
+        self._conf   = 0.5                           # [0..1]
+        self._surp_e = 0.0
+        self._rew_e  = 0.0
+        self._risk_e = 0.0
+        self._unc_e  = 1.0
+        self._prog_e = 0.0
+        self._free   = 1.0
         self._ts     = time.time()
 
-        # هوک کالیبراتور (اختیاری، از selfmeta/calibrate)
-        self._calibrator = None  # شیء با method: update(p, y) و predict(p)
+        # هوک کالیبراتور (اختیاری)
+        self._calibrator = None  # شیء با متدهای update(p,y) و predict(p)
 
     # ───── کمکی‌ها ─────
 
@@ -95,26 +69,21 @@ class SelfModel:
 
     def _u_to_conf(self, u: float) -> float:
         """
-        نگاشت عدم‌قطعیت به اعتماد: conf ≈ 1 - σ(slope*u - bias)
-        σ = سیگموید ملایم. سپس کلیپ به [0..1].
+        نگاشت پایدار: conf = σ( gain * (pivot - u) )
+        - u کوچک‌تر از pivot → conf بزرگ‌تر (رفتار شهودی)
         """
-        s = self.cfg.conf_slope * float(max(0.0, min(1.0, u))) - self.cfg.conf_bias
-        conf = 1.0 - (1.0 / (1.0 + math.exp(-5.0 * (0.5 - s))))  # سیگموید حول 0.5
+        u = self._clip01(float(u))
+        x = self.cfg.conf_gain * (self.cfg.conf_pivot - u)
+        conf = 1.0 / (1.0 + math.exp(-x))
         return self._clip01(conf)
 
     # ───── API به‌روزرسانی ─────
 
     def update(self, metrics: Dict[str, Any]) -> Dict[str, Any]:
         """
-        metrics انتظار می‌رود شامل برخی از این کلیدها باشد:
-          - u: عدم‌قطعیت پیش‌بینی [0..1]
-          - r_int: پاداش درونی/پیشرفت [0..1]
-          - r_total: پاداش کل (پس از شکل‌دهی) [-1..1] → نگاشت به [0..1]
-          - risk: ریسک عمل [0..1]
-          - energy: هزینه‌ی انرژی این گام [0..1]
-          - surprise: سیگنال شگفتی [0..1] (اگر نبود، با u تقریبی می‌زنیم)
-
-        خروجی: snapshot dict شامل self_vector و مؤلفه‌ها.
+        metrics می‌تواند شامل کلیدهای زیر باشد:
+          u, r_int, r_total ([-1..1]), risk, energy, surprise
+        خروجی: snapshot شامل مؤلفه‌ها و self_vector.
         """
         u = float(metrics.get("u", self._unc_e))
         r_int = float(metrics.get("r_int", 0.0))
@@ -123,31 +92,31 @@ class SelfModel:
         energy_cost = float(metrics.get("energy", 0.0))
         surprise = float(metrics.get("surprise", u))
 
-        # 1) انرژی: شارژ ملایم سپس کم‌کردن هزینه
-        self._energy = self._clip01(self._energy * self.cfg.energy_decay)
-        self._energy = self._clip01(self._energy - min(energy_cost, self.cfg.energy_cost_cap))
-        self._energy = max(self._energy, self.cfg.energy_floor)
+        # 1) انرژی: شارژ به‌سمت 1.0 سپس کسر هزینه
+        # energy ← energy + η*(1-energy) − cost
+        self._energy = self._energy + self.cfg.energy_recharge * (1.0 - self._energy)
+        self._energy = self._energy - min(energy_cost, self.cfg.energy_cost_cap)
+        self._energy = self._clip01(max(self._energy, self.cfg.energy_floor))
 
         # 2) EMA ها
         self._surp_e = self._ema(self._surp_e, surprise, self.cfg.alpha_surp)
-        self._rew_e  = self._ema(self._rew_e, (r_tot + 1.0) * 0.5, self.cfg.alpha_reward)  # نگاشت [-1..1]→[0..1]
+        self._rew_e  = self._ema(self._rew_e, (r_tot + 1.0) * 0.5, self.cfg.alpha_reward)  # [-1..1]→[0..1]
         self._risk_e = self._ema(self._risk_e, risk, self.cfg.alpha_risk)
         self._unc_e  = self._ema(self._unc_e, u, self.cfg.alpha_unc)
         self._prog_e = self._ema(self._prog_e, r_int, self.cfg.alpha_prog)
 
-        # 3) اعتماد از روی u (و در آینده از کالیبراتور)
+        # 3) اعتماد از روی u (کالیبره‌کردنِ اختیاری بیرون از این تابع انجام می‌شود)
         self._conf = self._u_to_conf(self._unc_e)
 
         # 4) مهر زمان
         self._ts = time.time()
 
-        snap = self.snapshot()
-        return snap
+        return self.snapshot()
 
     # ───── دسترسی به وضعیت ─────
 
     def vector(self) -> List[float]:
-        """بردار 8بعدی وضعیت درونی را برمی‌گرداند."""
+        """بردار 8بعدی وضعیت درونی را برمی‌گرداند: [energy, conf, surp, rew, risk, unc, prog, free]."""
         return [
             self._energy,
             self._conf,
@@ -179,17 +148,13 @@ class SelfModel:
     # ───── کالیبراسیون (اختیاری) ─────
 
     def attach_calibrator(self, calibrator: Any) -> None:
-        """
-        کالکتوری با امضای زیر متصل کنید:
-          calibrator.update(p: float, y: int) -> None   # y∈{0,1}
-          calibrator.predict(p: float) -> float         # p کالیبره‌شده
-        """
+        """calibrator با امضای update(p,y) و predict(p) را متصل کنید."""
         self._calibrator = calibrator
 
     def calibrated_confidence(self, raw_p: float, outcome_ok: Optional[bool] = None) -> float:
         """
-        اگر کالیبراتور نصب باشد و outcome_ok معلوم باشد، آن را به‌روز می‌کند.
-        سپس احتمال کالیبره‌شده را برمی‌گرداند.
+        اگر کالیبراتور نصب باشد و outcome_ok معلوم باشد، آن را به‌روز می‌کند،
+        سپس p کالیبره‌شده را برمی‌گرداند.
         """
         p = self._clip01(float(raw_p))
         if self._calibrator is not None:
@@ -209,8 +174,6 @@ class SelfModel:
 if __name__ == "__main__":
     cfg = SelfModelCfg()
     sm = SelfModel(cfg)
-
-    # چند گام ساختگی
     for t in range(5):
         snap = sm.update({
             "u": 0.2 + 0.1 * (t % 2),

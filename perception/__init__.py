@@ -1,11 +1,9 @@
 # -*- coding: utf-8 -*-
 """
 NOEMA • perception package
-- رابط ساده برای استفاده از رمزگذار متنی در بقیه‌ی پروژه.
-- اگر بعداً مدل آموختنی بارگذاری شد، همین API ثابت می‌ماند.
 
-استفاده:
-    from perception import encode, encode_batch, set_config
+Lightweight interface for the text encoder used across the project.
+If a learned model is added later, this API can remain stable.
 """
 
 from .encoder import (

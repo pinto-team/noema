@@ -1,10 +1,15 @@
 # -*- coding: utf-8 -*-
-"""پاسخ کوچک برای گفتگوهای عمومی."""
+"""NOEMA • skills/reply_smalltalk.py — Lightweight smalltalk fallback."""
 
-def run(user_text: str = "", **kwargs):
+from __future__ import annotations
+
+from typing import Dict, Any
+
+
+def run(user_text: str = "", **kwargs) -> Dict[str, Any]:
     reply = (
-        "فعلاً سلام و حساب ساده بلدم؛ اما دارم یاد می‌گیرم! "
-        "اگر هدفت رو دقیق‌تر بگی یا یک مثال بزنی، بهتر کمک می‌کنم 😊"
+        "Right now I can greet and do simple calculations, and I'm learning the rest. "
+        "If you share your goal or a quick example, I can help better."
     )
     return {
         "intent": "smalltalk",

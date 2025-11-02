@@ -1,41 +1,45 @@
 # -*- coding: utf-8 -*-
 """
-NOEMA • memory/index_faiss.py — ایندکس برداری (ANN) مینیمال با FAISS (V0)
-- هدف: جست‌وجوی اپیزودهای مشابه بر اساس بردار کلید (z/s/میانگین).
-- سازگار با فایل‌های JSONL اپیزود (memory/episodic.py).
+NOEMA • memory/index_faiss.py — Minimal ANN Index with FAISS (V0)
 
-خلاصه‌ی طراحی:
-- دو فایل کنار هم ذخیره می‌شوند:
-    data/index/faiss.index         ← خودِ ایندکس FAISS
-    data/index/faiss.meta.jsonl    ← متادیتای هر بردار (به همان ترتیب)
-- اگر faiss نصب نباشد، یک fallback ساده با NumPy (brute-force) فعال می‌شود.
+Purpose:
+  Vector search over episodic records using a key vector (z/s/mean).
 
-API اصلی:
-    idx = FaissIndex(dim=64, kind="HNSW32", metric="ip")
-    idx.add([vec1, vec2, ...], metas=[{...}, ...])       # افزودن دسته‌ای
-    D, I, M = idx.search(query_vec, k=5)                  # نتایج (فاصله‌ها، شناسه‌ها، متا)
-    idx.save(prefix="data/index/faiss")                   # ذخیره
-    idx2 = FaissIndex.load(prefix="data/index/faiss")     # بارگذاری
+Persistence:
+  - <prefix>.index       : FAISS index (if FAISS is available)
+  - <prefix>.meta.jsonl  : line-delimited metadata aligned with index order
 
-ادمین:
-    - برای cosine، بردارها را L2 normalize کنید و metric="ip" بگذارید.
-    - برای L2، normalize نکنید و metric="l2" قرار دهید.
+If FAISS is not installed, a simple NumPy-based brute-force index is used.
+
+API:
+  idx = FaissIndex(IndexConfig(dim=64, kind="HNSW32", metric="ip"))
+  idx.add([vec1, vec2, ...], metas=[{...}, ...])
+  D, I, M = idx.search(query_vec, k=5)
+  idx.save(prefix="data/index/faiss")
+  idx2 = FaissIndex.load(prefix="data/index/faiss")
+
+Notes:
+  - For cosine similarity use L2-normalized vectors with metric="ip".
+  - For L2 distance set metric="l2" and avoid normalization.
 """
-
 from __future__ import annotations
+
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 from pathlib import Path
-import json, os, math, numpy as np
+import json
+import numpy as np
 
-# تلاش برای وارد کردن FAISS
+# Try FAISS
 try:
     import faiss  # type: ignore
     _HAS_FAISS = True
 except Exception:
     _HAS_FAISS = False
 
-# ابزارها
+
+# ---------------------- helpers ----------------------
+
 def _as_float32(a: Iterable[float]) -> np.ndarray:
     return np.asarray(list(a), dtype=np.float32)
 
@@ -45,10 +49,11 @@ def _l2_normalize_inplace(X: np.ndarray) -> None:
     norms[norms == 0] = 1.0
     X /= norms
 
-# ---------------------- ایندکس fallback (بدون FAISS) ----------------------
+
+# ---------------------- brute-force fallback ----------------------
 
 class _BruteANN:
-    """جایگزین ساده وقتی faiss موجود نیست؛ جست‌وجوی O(ND)."""
+    """Simple O(ND) search used when FAISS is unavailable."""
     def __init__(self, dim: int, metric: str = "ip"):
         assert metric in ("ip", "l2")
         self.dim = int(dim)
@@ -70,7 +75,6 @@ class _BruteANN:
             return np.zeros((0,), dtype=np.float32), np.zeros((0,), dtype=np.int64)
         X = self._X  # [N, D]
         if self.metric == "ip":
-            # فرض: q و X نرمال شده‌اند (cosine≈dot)
             scores = X @ q  # [N]
             I = np.argsort(-scores)[:k]
             D = scores[I]
@@ -81,19 +85,19 @@ class _BruteANN:
             D = d2[I]
         return D.astype(np.float32), I.astype(np.int64)
 
-# ---------------------- ایندکس FAISS اصلی ----------------------
+
+# ---------------------- FAISS wrapper ----------------------
 
 @dataclass
 class IndexConfig:
     dim: int = 64
-    kind: str = "HNSW32"     # "Flat", "HNSW32", "IVF100,PQ16" ...
-    metric: str = "ip"       # "ip" (cos) یا "l2"
-    l2_normalize: bool = True  # اگر metric="ip" و قصد cosine دارید، True باشد.
+    kind: str = "HNSW32"       # "FLAT", "HNSW32", "IVF100,PQ16", ...
+    metric: str = "ip"         # "ip" (cosine via dot) or "l2"
+    l2_normalize: bool = True  # True for cosine/IP workflows
+
 
 class FaissIndex:
-    """
-    لایه‌ی نازک روی FAISS + فایل متادیتا.
-    """
+    """Thin wrapper over FAISS + sidecar metadata file."""
 
     def __init__(self, cfg: IndexConfig, index_obj: Any = None, metas: Optional[List[Dict[str, Any]]] = None):
         self.cfg = cfg
@@ -103,56 +107,74 @@ class FaissIndex:
         if not _HAS_FAISS:
             self._fallback = _BruteANN(cfg.dim, cfg.metric)
 
-    # ---------- ساخت ایندکس ----------
+    # ---------- index creation ----------
     @staticmethod
     def _create_index(cfg: IndexConfig):
         if not _HAS_FAISS:
             return None
-        metric = faiss.METRIC_INNER_PRODUCT if cfg.metric == "ip" else faiss.METRIC_L2
-        if cfg.kind.upper() == "FLAT":
-            index = faiss.IndexFlat(cfg.dim, metric)
-        elif cfg.kind.upper().startswith("HNSW"):
-            # HNSW32 → M=32
-            try:
-                m = int(cfg.kind.upper().replace("HNSW", ""))
-            except Exception:
-                m = 32
-            index = faiss.IndexHNSWFlat(cfg.dim, m, metric)
-            index.hnsw.efSearch = 64
-            index.hnsw.efConstruction = 80
-        else:
-            # تلاش برای parse IVF,PQ؛ اگر نشد، Flat
-            try:
-                # e.g., "IVF100,PQ16"
-                coarse = int(cfg.kind.split(",")[0].replace("IVF", ""))
-                pqm = int(cfg.kind.split(",")[1].replace("PQ", ""))
-                quantizer = faiss.IndexFlat(cfg.dim, metric)
-                index = faiss.IndexIVFPQ(quantizer, cfg.dim, coarse, pqm, 8, metric)
-                index.nprobe = min(8, coarse)
-            except Exception:
-                index = faiss.IndexFlat(cfg.dim, metric)
-        return index
 
-    # ---------- افزودن ----------
+        metric_const = faiss.METRIC_INNER_PRODUCT if cfg.metric == "ip" else faiss.METRIC_L2
+
+        def _flat():
+            if cfg.metric == "ip":
+                return faiss.IndexFlatIP(cfg.dim)
+            return faiss.IndexFlatL2(cfg.dim)
+
+        kind = (cfg.kind or "FLAT").upper()
+        try:
+            if kind == "FLAT":
+                return _flat()
+            elif kind.startswith("HNSW"):
+                # e.g., HNSW32 -> M=32 ; FAISS may or may not accept a metric arg by version.
+                try:
+                    m = int(kind.replace("HNSW", ""))
+                except Exception:
+                    m = 32
+                try:
+                    # newer FAISS: IndexHNSWFlat(dim, M, metric)
+                    return faiss.IndexHNSWFlat(cfg.dim, m, metric_const)  # type: ignore[arg-type]
+                except Exception:
+                    # fallback: default metric (typically L2). With unit vectors, L2 rankings ≈ cosine.
+                    return faiss.IndexHNSWFlat(cfg.dim, m)
+            else:
+                # Try IVF,PQ style (e.g., "IVF100,PQ16")
+                try:
+                    parts = kind.split(",")
+                    nlist = int(parts[0].replace("IVF", ""))
+                    pqm = int(parts[1].replace("PQ", "")) if len(parts) > 1 else 16
+                    quantizer = _flat()
+                    # Some FAISS versions place metric on index or quantizer; try safest form:
+                    index = faiss.IndexIVFPQ(quantizer, cfg.dim, nlist, pqm, 8)
+                    index.metric_type = metric_const  # may be ignored in older versions
+                    index.nprobe = min(8, nlist)
+                    return index
+                except Exception:
+                    return _flat()
+        except Exception:
+            return _flat()
+
+    # ---------- add ----------
     def add(self, vecs: List[List[float]], metas: Optional[List[Dict[str, Any]]] = None) -> None:
         X = np.asarray(vecs, dtype=np.float32)
         assert X.ndim == 2 and X.shape[1] == self.cfg.dim, f"Expected [N,{self.cfg.dim}] got {X.shape}"
         if self.cfg.l2_normalize and self.cfg.metric == "ip":
             _l2_normalize_inplace(X)
+
         # FAISS
         if self._index is not None:
-            # اگر IVF است و آموزش ندیده، یکبار آموزش بده
             if hasattr(self._index, "is_trained") and not self._index.is_trained:
                 self._index.train(X)
             self._index.add(X)
+
         # Fallback
         if self._fallback is not None:
             self._fallback.add(X)
-        # متادیتا
+
+        # Metadata
         metas = metas or [{} for _ in range(X.shape[0])]
         self.metas.extend(metas)
 
-    # ---------- تعداد ----------
+    # ---------- count ----------
     def ntotal(self) -> int:
         if self._index is not None:
             return int(self._index.ntotal)
@@ -160,7 +182,7 @@ class FaissIndex:
             return self._fallback.ntotal()
         return 0
 
-    # ---------- جست‌وجو ----------
+    # ---------- search ----------
     def search(self, q: List[float], k: int = 5) -> Tuple[np.ndarray, np.ndarray, List[Dict[str, Any]]]:
         if self.ntotal() == 0:
             return np.zeros((0,), dtype=np.float32), np.zeros((0,), dtype=np.int64), []
@@ -176,56 +198,61 @@ class FaissIndex:
         else:
             D, I = self._fallback.search(qv, min(k, self.ntotal()))  # type: ignore
 
-        metas = [self.metas[i] for i in I if 0 <= int(i) < len(self.metas)]
-        return D, I, metas
+        metas = [self.metas[int(i)] for i in I if 0 <= int(i) < len(self.metas)]
+        return D.astype(np.float32), I.astype(np.int64), metas
 
-    # ---------- ذخیره ----------
+    # ---------- save ----------
     def save(self, prefix: str | Path = "data/index/faiss") -> None:
         prefix = str(prefix)
         idx_path = Path(prefix + ".index")
         meta_path = Path(prefix + ".meta.jsonl")
         idx_path.parent.mkdir(parents=True, exist_ok=True)
+
         if _HAS_FAISS and self._index is not None:
             faiss.write_index(self._index, str(idx_path))
-        # متادیتا
+
         with meta_path.open("w", encoding="utf-8") as f:
             for m in self.metas:
                 f.write(json.dumps(m, ensure_ascii=False) + "\n")
 
-    # ---------- بارگذاری ----------
+    # ---------- load ----------
     @classmethod
     def load(cls, prefix: str | Path = "data/index/faiss", cfg: Optional[IndexConfig] = None) -> "FaissIndex":
         prefix = str(prefix)
         idx_path = Path(prefix + ".index")
         meta_path = Path(prefix + ".meta.jsonl")
+
         metas: List[Dict[str, Any]] = []
         if meta_path.exists():
             with meta_path.open("r", encoding="utf-8") as f:
                 for ln in f:
                     ln = ln.strip()
-                    if not ln:
-                        continue
-                    try:
-                        metas.append(json.loads(ln))
-                    except Exception:
-                        continue
-        # اگر faiss هست و فایل وجود دارد، بخوان
+                    if ln:
+                        try:
+                            metas.append(json.loads(ln))
+                        except Exception:
+                            continue
+
         index_obj = None
         if _HAS_FAISS and idx_path.exists():
-            index_obj = faiss.read_index(str(idx_path))
-            dim = index_obj.d
-            metric = "ip" if index_obj.metric_type == faiss.METRIC_INNER_PRODUCT else "l2"
-            if cfg is None:
-                cfg = IndexConfig(dim=dim, metric=metric)
+            try:
+                index_obj = faiss.read_index(str(idx_path))
+                dim = int(index_obj.d)
+                if cfg is None:
+                    cfg = IndexConfig(dim=dim)  # metric/kind cannot be reliably read across FAISS variants
+            except Exception:
+                index_obj = None
+
         if cfg is None:
-            # حدس از متادیتا یا پیش‌فرض
             cfg = IndexConfig()
+
         return cls(cfg=cfg, index_obj=index_obj, metas=metas)
 
-# ---------------------- یکپارچه با EpisodeStore ----------------------
+
+# ---------------------- EpisodeStore integration ----------------------
 
 def build_from_episode_store(
-    store,
+    store: Any,
     *,
     key_mode: str = "mean",
     dim: int = 64,
@@ -235,25 +262,26 @@ def build_from_episode_store(
     limit_days: Optional[int] = None,
 ) -> FaissIndex:
     """
-    از اپیزودهای ذخیره‌شده یک ایندکس می‌سازد.
-    - store: EpisodeStore (memory/episodic.EpisodeStore)
-    - key_mode: "mean" | "z" | "s"
-    - limit_days: اگر تعیین شد، فقط همین تعداد روز اخیر را می‌خواند.
+    Build an index from stored episodes.
+
+    Args:
+      store: EpisodeStore (memory/episodic.EpisodeStore)
+      key_mode: "mean" | "z" | "s"
+      limit_days: if set, only use episodes from the last `limit_days` days.
     """
     from datetime import datetime, timedelta
-    from memory.episodic import make_key_vector, Episode
+    from memory.episodic import make_key_vector, Episode  # type: ignore
 
     cfg = IndexConfig(dim=dim, kind=kind, metric=metric, l2_normalize=normalize and (metric == "ip"))
     idx = FaissIndex(cfg)
 
-    # جمع‌آوری اپیزودها
+    # Collect episodes
     episodes: List[Episode] = []
     if limit_days is None:
-        # ساده: tail زیاد بگیریم (برای V0)
         episodes = store.tail(n=5000)
     else:
         today = datetime.utcnow().date()
-        start = today - timedelta(days=max(0, int(limit_days)-1))
+        start = today - timedelta(days=max(0, int(limit_days) - 1))
         for ep in store.iter_days(start.isoformat(), today.isoformat()):
             episodes.append(ep)
 
@@ -268,7 +296,7 @@ def build_from_episode_store(
             continue
         vecs.append(key)
         metas.append({
-            "ts": ep.ts,
+            "ts": float(ep.ts),
             "session_id": ep.session_id,
             "intent": ep.intent,
             "action": ep.action_name,
@@ -280,22 +308,20 @@ def build_from_episode_store(
         idx.add(vecs, metas=metas)
     return idx
 
-# ---------------------- اجرای مستقیم (تست دستی) ----------------------
 
+# ---------------------- manual test ----------------------
 if __name__ == "__main__":
     try:
-        from memory.episodic import EpisodeStore
-    except Exception as e:
-        print("⚠️ برای تست، ابتدا memory/episodic.py را داشته باشید.")
-        raise
+        from memory.episodic import EpisodeStore  # type: ignore
+    except Exception:
+        raise RuntimeError("Please provide memory/episodic.py (EpisodeStore) for testing.")
 
     store = EpisodeStore()
-    # اگر اپیزودی ندارید، یکی ثبت کنیم
     if not store.tail(1):
         store.log(
             session_id="S-TEST",
-            text_in="سلام",
-            text_out="سلام! خوش اومدی",
+            text_in="hello",
+            text_out="hi there!",
             intent="greeting",
             action_kind="skill",
             action_name="reply_greeting",
@@ -305,8 +331,8 @@ if __name__ == "__main__":
         )
         store.log(
             session_id="S-TEST",
-            text_in="۲+۲؟",
-            text_out="۴",
+            text_in="2+2?",
+            text_out="4",
             intent="compute",
             action_kind="tool",
             action_name="invoke_calc",
@@ -318,7 +344,6 @@ if __name__ == "__main__":
     idx = build_from_episode_store(store, key_mode="mean", dim=64, metric="ip", kind="HNSW32", normalize=True)
     print("ntotal:", idx.ntotal())
 
-    # کوئری: یک بردار ساختگی نزدیک به «سلام»
     q = np.array([0.12]*64, dtype=np.float32)
     q /= (np.linalg.norm(q) or 1.0)
     D, I, M = idx.search(q.tolist(), k=3)
@@ -326,8 +351,6 @@ if __name__ == "__main__":
     print("search I:", I)
     print("search metas:", M[:2])
 
-    # ذخیره
     idx.save("data/index/faiss")
-    # بارگذاری
     idx2 = FaissIndex.load("data/index/faiss")
     print("loaded ntotal:", idx2.ntotal())

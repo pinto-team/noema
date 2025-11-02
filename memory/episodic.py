@@ -1,38 +1,35 @@
 # -*- coding: utf-8 -*-
 """
-NOEMA • memory/episodic.py — حافظه‌ی اپیزودیک (V0 سبک و فایل‌محور)
-- هدف: ثبت اپیزودهای تعامل (ورودی/خروجی/کنش/پاداش/بردارها) به‌شکل JSONL روزانه،
-  با قابلیت مرور، جست‌وجوی ساده، و فشرده‌سازی اختیاری به Parquet.
-- ایندکس برداری (ANN) در فایل جداگانه‌ی memory/index_faiss.py انجام می‌شود.
+NOEMA • memory/episodic.py — File-based Episodic Memory (V0)
 
-طراحی:
+Goal:
+  Append-only daily JSONL logs of interaction episodes (I/O, action, rewards, vectors),
+  with simple traversal utilities and optional Parquet compaction.
+
+Layout:
   data/episodes/
-    ├─ 2025-10-30.jsonl
-    ├─ 2025-10-31.jsonl
-    └─ parquet/ (اختیاری؛ خروجی فشرده‌سازی)
+    ├─ YYYY-MM-DD.jsonl
+    └─ parquet/  (optional)
 
-API اصلی:
-  store = EpisodeStore(root="data/episodes")
-  store.log( ... فیلدها ... )                      # افزودن یک رکورد
-  for ep in store.iter_days("2025-10-30","2025-10-31"): ...
-  tail = store.tail(n=20)                           # آخرین n رکورد
-  store.compact_day_to_parquet("2025-10-31")        # (اختیاری) تبدیل یک روز به Parquet
+Vector indexing is handled separately in memory/index_faiss.py.
 """
-
 from __future__ import annotations
+
 from dataclasses import dataclass, asdict, field
 from typing import Any, Dict, Iterable, Iterator, List, Optional, Tuple
 from pathlib import Path
 from datetime import datetime, date
-import json, time, os
+import json
+import time
 
 try:
-    import pandas as pd  # اختیاری، فقط برای فشرده‌سازی Parquet
+    import pandas as pd  # optional, only for Parquet compaction
     _HAS_PANDAS = True
 except Exception:
     _HAS_PANDAS = False
 
-# ----------------------------- ساختار داده -----------------------------
+
+# ----------------------------- Data -----------------------------
 
 @dataclass
 class Episode:
@@ -64,7 +61,8 @@ class Episode:
     def to_json(self) -> str:
         return json.dumps(asdict(self), ensure_ascii=False)
 
-# ----------------------------- ابزار تاریخ/مسیر -----------------------------
+
+# ----------------------------- Date/Path helpers -----------------------------
 
 def _day_str(ts: float | None = None) -> str:
     dt = datetime.utcfromtimestamp(ts or time.time()).date()
@@ -77,12 +75,13 @@ def _coerce_day_str(d: str | date | None = None) -> str:
         return d.isoformat()
     return str(d)
 
-# ----------------------------- EpisodeStore -----------------------------
+
+# ----------------------------- Store -----------------------------
 
 class EpisodeStore:
     """
-    ذخیره‌سازی JSONL روزانه با فشرده‌سازی اختیاری.
-    Thread-safe کامل نیست، اما برای V0 شخصی کافی است.
+    Daily JSONL store with optional Parquet compaction.
+    This is not fully thread-safe but good enough for V0.
     """
 
     def __init__(self, root: str | Path = "data/episodes"):
@@ -90,12 +89,12 @@ class EpisodeStore:
         self.root.mkdir(parents=True, exist_ok=True)
         (self.root / "parquet").mkdir(parents=True, exist_ok=True)
 
-    # ---------- مسیر فایل روز ----------
+    # ---------- per-day file ----------
     def _file_for_day(self, day: str | None = None) -> Path:
         d = _coerce_day_str(day)
         return self.root / f"{d}.jsonl"
 
-    # ---------- افزودن رکورد ----------
+    # ---------- append ----------
     def log(
         self,
         *,
@@ -140,7 +139,7 @@ class EpisodeStore:
             f.write(rec.to_json() + "\n")
         return rec
 
-    # ---------- نگاشت Transition → Episode ----------
+    # ---------- Transition → Episode ----------
     def log_transition(
         self,
         *,
@@ -156,8 +155,8 @@ class EpisodeStore:
         day: Optional[str] = None,
     ) -> Episode:
         """
-        برای سازگاری با خروجی app/main.py و سایر ماژول‌ها.
-        state باید شامل u/conf و بردار s باشد؛ latent شامل z.
+        Compatibility shim for app/main.py style transitions.
+        `state` should include {u, conf, s}; `latent` should include {z}.
         """
         s_vec = state.get("s") if isinstance(state, dict) else state
         z_vec = latent.get("z") if isinstance(latent, dict) else latent
@@ -186,7 +185,7 @@ class EpisodeStore:
             day=day,
         )
 
-    # ---------- پیمایش ----------
+    # ---------- iterate ----------
     def iter_day(self, day: str | date | None = None) -> Iterator[Episode]:
         path = self._file_for_day(day)
         if not path.exists():
@@ -205,7 +204,7 @@ class EpisodeStore:
         return _gen()
 
     def iter_days(self, start_day: str | date, end_day: str | date) -> Iterator[Episode]:
-        """شامل هر دو انتها."""
+        """Inclusive of both endpoints."""
         start = datetime.fromisoformat(_coerce_day_str(start_day)).date()
         end   = datetime.fromisoformat(_coerce_day_str(end_day)).date()
         cur = start
@@ -214,11 +213,11 @@ class EpisodeStore:
                 yield ep
             cur = date.fromordinal(cur.toordinal() + 1)
 
-    # ---------- Tail ----------
+    # ---------- tail ----------
     def tail(self, n: int = 20) -> List[Episode]:
         """
-        آخرین n رکورد بین چند فایل روزانه.
-        ساده: از امروز به عقب می‌خوانیم تا n پر شود.
+        Return the last n records across recent day-files.
+        Simple implementation: walk backwards day-by-day until n is collected (limit 365 days).
         """
         out: List[Episode] = []
         today = datetime.utcnow().date()
@@ -226,7 +225,6 @@ class EpisodeStore:
         while len(out) < n:
             p = self._file_for_day(cur.isoformat())
             if p.exists():
-                # ساده: کل فایل را بخوان، ولی اگر بزرگ شد، بهینه‌سازی کن
                 lines = p.read_text(encoding="utf-8").splitlines()
                 for line in reversed(lines):
                     if len(out) >= n:
@@ -236,26 +234,24 @@ class EpisodeStore:
                         out.append(Episode(**obj))
                     except Exception:
                         continue
-            # روز قبل
             cur = date.fromordinal(cur.toordinal() - 1)
-            # قطع امن پس از 365 روز
             if (today.toordinal() - cur.toordinal()) > 365:
                 break
         return list(reversed(out))
 
-    # ---------- فشرده‌سازی به Parquet ----------
+    # ---------- Parquet compaction ----------
     def compact_day_to_parquet(self, day: str | date) -> Optional[Path]:
         """
-        فایل JSONL آن روز را به Parquet تبدیل می‌کند. نیازمند pandas است.
-        خروجی: data/episodes/parquet/{day}.parquet
+        Convert a day's JSONL to Parquet (requires pandas).
+        Output: data/episodes/parquet/{day}.parquet
         """
         if not _HAS_PANDAS:
-            print("⚠️ pandas در دسترس نیست؛ فشرده‌سازی انجام نشد.")
+            print("⚠️ pandas not available; skipping compaction.")
             return None
         d = _coerce_day_str(day)
         src = self._file_for_day(d)
         if not src.exists():
-            print(f"⚠️ فایل روز {d} یافت نشد.")
+            print(f"⚠️ day file not found: {d}")
             return None
         rows: List[Dict[str, Any]] = []
         with src.open("r", encoding="utf-8") as f:
@@ -268,7 +264,7 @@ class EpisodeStore:
                 except Exception:
                     continue
         if not rows:
-            print("⚠️ رکوردی برای فشرده‌سازی نیست.")
+            print("⚠️ nothing to compact.")
             return None
         df = pd.DataFrame(rows)
         out = self.root / "parquet" / f"{d}.parquet"
@@ -277,21 +273,22 @@ class EpisodeStore:
         print(f"✅ parquet written: {out}")
         return out
 
-# ----------------------------- کلید برداری برای ANN -----------------------------
+
+# ----------------------------- Key vector for ANN -----------------------------
 
 def make_key_vector(ep: Episode, mode: str = "mean", dim_limit: Optional[int] = None) -> List[float]:
     """
-    کلید برداری برای ایندکس معنایی:
-      - mode="mean": میانگین z و s (اگر باشد)
-      - mode="z": فقط z
-      - mode="s": فقط s
-    dim_limit: اگر تعیین شود، بردار به آن طول بریده/پد می‌شود (برای سازگاری با ایندکس).
+    Build a key vector for semantic indexing:
+      - mode="mean": average of z and s if both present (same dim), else whichever is present
+      - mode="z": only z
+      - mode="s": only s
+
+    dim_limit: if set, trim/pad the vector to this length.
     """
     z = ep.z_vec or []
     s = ep.s_vec or []
-    key: List[float]
     if mode == "z":
-        key = list(z)
+        key: List[float] = list(z)
     elif mode == "s":
         key = list(s)
     else:
@@ -310,15 +307,14 @@ def make_key_vector(ep: Episode, mode: str = "mean", dim_limit: Optional[int] = 
             key = key + [0.0] * (D - len(key))
     return key
 
-# ----------------------------- تست سریع -----------------------------
 
+# ----------------------------- manual test -----------------------------
 if __name__ == "__main__":
     store = EpisodeStore()
-    # یک نمونه لاگ
     ep = store.log(
         session_id="S-TEST",
-        text_in="۲+۲؟",
-        text_out="۴",
+        text_in="2+2?",
+        text_out="4",
         intent="compute",
         action_kind="tool",
         action_name="invoke_calc",
@@ -327,7 +323,7 @@ if __name__ == "__main__":
         risk=0.0, energy=0.01,
         u=0.1, conf=0.9,
         s_vec=[0.1]*8, z_vec=[0.12]*8,
-        tests=[{"name":"alt_eval","pass":True}],
+        tests=[{"name": "alt_eval", "pass": True}],
         costs={"latency_ms": 5, "compute": 2},
         tags=["demo"],
     )
@@ -335,5 +331,4 @@ if __name__ == "__main__":
 
     print("tail(3):", [e.text_in for e in store.tail(3)])
 
-    # فشرده‌سازی روز جاری (اگر pandas نصب باشد)
     store.compact_day_to_parquet(_day_str())

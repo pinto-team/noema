@@ -1,26 +1,45 @@
-# NOEMA • skills/manifest.yaml — فهرست مهارت‌های درون‌سیستمی (V0)
-# هر مهارت یک تابع پایتونی است که توسط لایه‌ی اجرا (app/*) صدا زده می‌شود.
-# نام‌ها باید با control/candidates.py هماهنگ باشند.
+# NOEMA • skills/manifest.yaml
+# Registry of skills (and tools) for the SkillRegistry loader.
 
 skills:
   - name: reply_greeting
     kind: skill
-    desc: "پاسخ مودبانه/دوستانه به سلام"
-    entry: "skills.reply_greeting:run"   # ماژول:تابع
-    tags: ["basic", "safe"]
-    allowed_args: {}                     # بدون آرگومان
+    desc: "Short, polite greeting response"
+    entry: "skills.reply_greeting:run"
+    tags: ["core", "social"]
+    allowed_args: {}
     cost: 0.02
+    enabled: true
 
+  - name: reply_smalltalk
+    kind: skill
+    desc: "General smalltalk fallback response"
+    entry: "skills.reply_smalltalk:run"
+    tags: ["fallback"]
+    allowed_args: {}
+    cost: 0.03
+    enabled: true
+
+  - name: reply_from_memory
+    kind: skill
+    desc: "Return output from best-matching DEMO memory"
+    entry: "skills.reply_from_memory:run"
+    tags: ["memory", "demo"]
+    allowed_args: {}
+    cost: 0.05
+    enabled: true
+
+  # Tool: prefer calling via toolhub. SkillRegistry.run will raise NotImplementedError.
   - name: invoke_calc
     kind: tool
-    desc: "ماشین‌حساب امن چهار عمل اصلی"
-    # برای هم‌خوانی با رجیستری ابزار، این مورد معمولاً از toolhub بارگذاری/بایند می‌شود.
-    # در صورت نبود config/tools.yaml، toolhub/__init__.py یک نسخه‌ی امن را بایند می‌کند.
-    entry: null
-    tags: ["basic", "safe"]
+    desc: "Safe four-operator calculator"
+    entry:
+    tags: ["basic"]
     allowed_args:
       expr:
         type: "str"
-        regex: "^[0-9\\u06F0-\\u06F9\\u0660-\\u0669+\\-*/() \\t]+$"  # اجازهٔ ارقام فارسی/عربی برای محاسبه
+        # Accept ASCII and Arabic-Indic digits; math symbols are normalized by skills/invoke_calc.py
+        regex: "^[0-9\u06F0-\u06F9\u0660-\u0669+\-*/()\t ]+$"
         max_len: 256
     cost: 0.05
+    enabled: true

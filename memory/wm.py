@@ -1,61 +1,52 @@
 # -*- coding: utf-8 -*-
 """
-NOEMA • memory/wm.py — حافظه‌ی کاری (Working Memory) مینیمال V0
-- بافر حلقه‌ای سبک برای نگه‌داری چند گام اخیر تعامل (z, s, action, outcome, reward).
-- بدون وابستگی خارجی؛ فقط stdlib. برای استفاده مستقیم در app/main یا کنترل/پلنر.
+NOEMA • memory/wm.py — Minimal Working Memory (V0)
 
-API اصلی:
-    wm = WorkingMemory(maxlen=16)
-    wm.push(z, s, action, outcome, reward, text_in=None)
-    wm.recent(k=8) -> List[WMItem]
-    wm.z_hist(k=8) -> List[List[float]]
-    wm.state_hist(k=8) -> List[List[float]]
-    wm.context(k=4) -> List[Tuple[str,str]]     # (input, output)
-    wm.clear()
+A small ring buffer to keep the last few interaction steps:
+  - latent/state vectors (z, s)
+  - chosen action and short outcome text
+  - reward signals
+  - optional original user input for quick context
 
-توجه:
-- این ماژول «اپیزودیک/دائمی» نیست؛ فقط حافظه‌ی کوتاه‌مدت است.
-- برای ذخیره‌ی پایدار و جست‌وجوی معنایی از memory/episodic و index_faiss استفاده کنید.
+This is short-term only (NOT persistent). For persistent episodic storage and
+semantic search, use memory/episodic.py and memory/index_faiss.py.
 """
-
 from __future__ import annotations
+
 from dataclasses import dataclass, asdict
 from collections import deque
 from typing import Any, Deque, Dict, List, Optional, Tuple
 import time
-import math
 
-# ---------------------------- داده‌های کمینه ----------------------------
+
+# ---------------------------- Data ----------------------------
 
 @dataclass
 class WMItem:
     ts: float
-    z: List[float]                          # بردار نهان (Latent)
-    s: List[float]                          # بردار وضعیت (State)
-    action: Dict[str, Any]                  # {"kind":.., "name":.., "args":{...}}
+    z: List[float]                       # latent vector
+    s: List[float]                       # state vector
+    action: Dict[str, Any]               # {"kind":.., "name":.., "args":{...}}
     outcome_text: Optional[str] = None
     reward_total: float = 0.0
     reward_int: float = 0.0
     reward_ext: float = 0.0
-    text_in: Optional[str] = None           # ورودی خام (اختیاری برای context)
+    text_in: Optional[str] = None        # raw user input (optional)
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
 
-# ---------------------------- WM ----------------------------
+
+# ---------------------------- Working Memory ----------------------------
 
 class WorkingMemory:
-    """
-    بافر حلقه‌ای سبک:
-      - آخرین N گام را نگه می‌دارد (پیش‌فرض 16).
-      - فقط برای استنتاج و زمینه‌ی کوتاه‌مدت استفاده می‌شود.
-    """
+    """A small ring buffer that keeps the last N items (default: 16)."""
 
     def __init__(self, maxlen: int = 16):
         self.maxlen: int = int(maxlen)
         self._buf: Deque[WMItem] = deque(maxlen=self.maxlen)
 
-    # ---- نوشتن ----
+    # ---- write ----
     def push(
         self,
         z: List[float],
@@ -67,15 +58,16 @@ class WorkingMemory:
         ts: Optional[float] = None,
     ) -> WMItem:
         """
-        یک رکورد به حافظه اضافه می‌کند.
-        پارامترها:
-          - z, s: بردارهای نهان/وضعیت (لیست float)
-          - action: {"kind","name","args"}
-          - outcome: {"text_out", ...}  (اختیاری)
-          - reward: {"r_total","r_int","r_ext"} (اختیاری)
-          - text_in: متن خام کاربر (اختیاری)
+        Append a new record into the buffer.
+
+        Args:
+          z, s: latent/state vectors (lists of floats)
+          action: {"kind","name","args"}
+          outcome: e.g. {"text_out": "..."} (optional)
+          reward:  {"r_total","r_int","r_ext"} (optional)
+          text_in: optional raw user input
         """
-        ts = ts if ts is not None else time.time()
+        ts = float(ts if ts is not None else time.time())
         out_text = None
         if isinstance(outcome, dict):
             out_text = outcome.get("text_out") or outcome.get("text") or None
@@ -84,43 +76,46 @@ class WorkingMemory:
         r_ext   = float((reward or {}).get("r_ext", 0.0))
 
         item = WMItem(
-            ts=ts, z=list(z), s=list(s),
+            ts=ts,
+            z=list(z),
+            s=list(s),
             action=dict(action or {}),
             outcome_text=out_text,
-            reward_total=r_total, reward_int=r_int, reward_ext=r_ext,
-            text_in=text_in
+            reward_total=r_total,
+            reward_int=r_int,
+            reward_ext=r_ext,
+            text_in=text_in,
         )
         self._buf.append(item)
         return item
 
-    # ---- خواندن ----
+    # ---- read ----
     def recent(self, k: int = 8) -> List[WMItem]:
-        """آخرین k آیتم (قدیمی→جدید)."""
+        """Return the last k items (oldest → newest)."""
         k = max(0, int(k))
         if k == 0 or not self._buf:
             return []
         return list(self._buf)[-k:]
 
     def z_hist(self, k: int = 8) -> List[List[float]]:
-        """آخرین k بردار z (قدیمی→جدید)."""
+        """Return the last k latent vectors (oldest → newest)."""
         return [it.z for it in self.recent(k)]
 
     def state_hist(self, k: int = 8) -> List[List[float]]:
-        """آخرین k بردار s (قدیمی→جدید)."""
+        """Return the last k state vectors (oldest → newest)."""
         return [it.s for it in self.recent(k)]
 
     def context(self, k: int = 4) -> List[Tuple[str, str]]:
         """
-        جفت‌های (input, output) اخیر را برمی‌گرداند.
-        فقط آیتم‌هایی که هر دو بخش را دارند انتخاب می‌شود.
+        Return recent (input, output) pairs where both are present.
         """
         pairs: List[Tuple[str, str]] = []
-        for it in self.recent(k= max(k, 0)):
+        for it in self.recent(k=max(k, 0)):
             if it.text_in and it.outcome_text:
                 pairs.append((it.text_in, it.outcome_text))
         return pairs
 
-    # ---- ابزارهای کمکی ----
+    # ---- utils ----
     def clear(self) -> None:
         self._buf.clear()
 
@@ -129,7 +124,7 @@ class WorkingMemory:
 
     def mean_z(self, k: int = 8) -> List[float]:
         """
-        میانگین z در پنجره‌ی اخیر؛ اگر بافر خالی باشد، لیست خالی.
+        Average the last k latent vectors; returns [] if empty.
         """
         zs = self.z_hist(k)
         if not zs:
@@ -148,8 +143,8 @@ class WorkingMemory:
     def last_output(self) -> Optional[str]:
         return self._buf[-1].outcome_text if self._buf else None
 
-# ---------------------------- تست سریع ----------------------------
 
+# ---------------------------- quick test ----------------------------
 if __name__ == "__main__":
     wm = WorkingMemory(maxlen=4)
     for i in range(6):
@@ -158,8 +153,8 @@ if __name__ == "__main__":
         a = {"kind": "tool", "name": "invoke_calc", "args": {"expr": f"{i}+{i}"}}
         out = {"text_out": f"{i+i}"}
         r = {"r_total": 0.5, "r_int": 0.3, "r_ext": 0.2}
-        wm.push(z, s, a, outcome=out, reward=r, text_in=f"ورودی {i}")
+        wm.push(z, s, a, outcome=out, reward=r, text_in=f"input {i}")
     print("len:", len(wm))
     print("z_hist last2:", wm.z_hist(2))
-    print("state mean:", wm.mean_z(4))
+    print("state mean_z:", wm.mean_z(4))
     print("context:", wm.context(3))

@@ -1,34 +1,37 @@
 # -*- coding: utf-8 -*-
 """
-NOEMA • control/planner.py — برنامه‌ریز کوتاه‌افق (V0، سبک و بدون وابستگی)
-هدف:
-  - از روی State فعلی + «طرح/نیت» (plan) و تابع پیش‌بینی world، چند دنباله‌ی کوتاه
-    از اعمال می‌سازد (عمق 1..2)، امتیاز هر دنباله را محاسبه می‌کند و «اولین عمل»
-    از بهترین دنباله را برمی‌گرداند.
-  - امتیازدهی هر گام با control.policy.score_candidate انجام می‌شود (یک‌دست با سیاست).
+NOEMA • control/planner.py — short-horizon planner (V0, lightweight)
 
-API:
-  plan_and_decide(
-      state, plan, generate_candidates_fn, predict_fn,
-      *, r_ext=0.0, beam=3, depth=2, gamma=0.9, method="argmax"
-  ) -> (best_action, rationale)
+Goal
+-----
+Given the current State, a high-level plan/intent, a candidate generator,
+and the world model's predict() function, simulate short action sequences
+(depth 1..2), score them, and return the *first* action from the best
+sequence plus a rationale for debugging.
 
-یادداشت‌ها:
-  - generate_candidates_fn همان چیزی‌ست که در app/main.py یا control/candidates.py دارید.
-  - predict_fn همان world.predict است.
-  - rationale شامل ریزجزئیات امتیازدهی دنباله‌ی برنده و چند دنباله‌ی جایگزین است.
+API
+----
+plan_and_decide(
+    state, plan, generate_candidates_fn, predict_fn,
+    *, r_ext=0.0, beam=3, depth=2, gamma=0.9, method="argmax"
+) -> (best_action, rationale)
+
+Notes
+-----
+- `generate_candidates_fn` is what you expose from control/candidates.py (or app/main.py).
+- `predict_fn` is typically world.predict.
+- Scoring per step is delegated to control.policy.score_candidate to stay
+  consistent with the policy.
 """
 
 from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Tuple
-import math
 
-# انواع داده از world
+# world types (fallback stubs for type hints)
 try:
     from world import State, Latent, Action  # type: ignore
 except Exception:
-    from dataclasses import dataclass
     @dataclass
     class State:
         s: List[float]; u: float = 0.0; conf: float = 0.0
@@ -39,10 +42,10 @@ except Exception:
     class Action:
         kind: str; name: str; args: Dict[str, Any]
 
-# سیاست/امتیازدهی تک‌گام
-from .policy import score_candidate, decide, RewardSpec, get_default_spec
+# policy helpers
+from .policy import score_candidate, RewardSpec, get_default_spec
 
-# ----------------------------- توابع کمکی -----------------------------
+# ----------------------------- helpers -----------------------------
 
 def _default_seq_generator(
     state: State,
@@ -50,39 +53,35 @@ def _default_seq_generator(
     base_candidates: List[Action],
 ) -> List[List[Action]]:
     """
-    دنباله‌های پیشنهادی اولیه:
-      - طول 1: همان نامزدهای پایه
-      - طول 2: اگر نیت unknown → [ask_clarify → (هر نامزد پایه)]
-               اگر intent=compute → [ask_clarify → invoke_calc] (به‌صورت احتیاطی)
+    Build simple sequences:
+      - length 1: all base candidates
+      - length 2:
+         * unknown → [ask_clarify → <each base>]
+         * compute → [ask_clarify → invoke_calc] when calc exists
     """
     seqs: List[List[Action]] = []
-    # طول 1
+
+    # len=1
     for a in base_candidates:
         seqs.append([a])
 
     intent = plan.get("intent", "unknown")
     if intent == "unknown":
-        # clarify سپس بهترین حدسیات
         clarify = Action(kind="policy", name="ask_clarify", args={})
         for a in base_candidates:
             if a.name != "ask_clarify":
                 seqs.append([clarify, a])
     elif intent == "compute":
-        # در محاسبه: clarify→calc (اگر موجود باشد)
         clarify = Action(kind="policy", name="ask_clarify", args={})
-        calc = None
-        for a in base_candidates:
-            if a.name == "invoke_calc":
-                calc = a
-                break
+        calc = next((a for a in base_candidates if a.name == "invoke_calc"), None)
         if calc:
             seqs.append([clarify, calc])
 
-    # حداکثر تنوع: حذف دنباله‌های تکراری
+    # de-duplicate
     uniq: List[List[Action]] = []
     seen = set()
     for seq in seqs:
-        key = tuple((a.kind, a.name, tuple(sorted(a.args.items()))) for a in seq)
+        key = tuple((a.kind, a.name, tuple(sorted((a.args or {}).items()))) for a in seq)
         if key not in seen:
             uniq.append(seq)
             seen.add(key)
@@ -99,27 +98,31 @@ def _rollout_sequence(
     gamma: float = 0.9,
 ) -> Tuple[float, List[Dict[str, Any]], State]:
     """
-    امتیاز دنباله را با تنزیل γ محاسبه می‌کند و جزییات هر گام را برمی‌گرداند.
+    Roll out a short sequence with discount gamma and return:
+      (total_score, step_details[], final_state)
     """
     spec = spec or get_default_spec()
     total = 0.0
     details: List[Dict[str, Any]] = []
     s = state
-    g = 1.0
-    for step, a in enumerate(seq):
+    discount = 1.0
+
+    for step_idx, a in enumerate(seq):
         score, det = score_candidate(s, a, predict_fn, r_ext=r_ext, energy_costs=energy_costs, spec=spec)
-        total += g * score
+        total += discount * score
         det = dict(det)
-        det["step"] = step
-        det["discount"] = g
+        det["step"] = step_idx
+        det["discount"] = discount
         details.append(det)
-        # حرکت وضعیت به s1 (از det مستقیم در دسترس نیست؛ دوباره predict می‌گیریم)
+
+        # advance state
         s1, _, _, _, _ = predict_fn(s, a)
         s = s1
-        g *= gamma
+        discount *= gamma
+
     return float(total), details, s
 
-# ----------------------------- برنامه‌ریزی/انتخاب -----------------------------
+# ----------------------------- planning -----------------------------
 
 def plan_and_decide(
     state: State,
@@ -136,58 +139,53 @@ def plan_and_decide(
     method: str = "argmax",
 ) -> Tuple[Action, Dict[str, Any]]:
     """
-    - ابتدا نامزدهای پایه را می‌سازد (generate_candidates_fn).
-    - سپس دنباله‌های 1..depth را با ژنراتور پیش‌فرض می‌چیند (عمق 2 کافی است).
-    - با rollout کوتاه، بهترین دنباله را برمی‌گزیند و «اولین عمل» را برمی‌گرداند.
-    - rationale شامل: seq برنده، امتیاز کل، و چند seq جایگزین است.
+    Orchestrates:
+      1) generate base candidates
+      2) build short sequences (len≤depth)
+      3) score via short rollouts
+      4) return the *first* action of the best sequence
     """
     spec = spec or get_default_spec()
-    base_cands = generate_candidates_fn(state, plan) or [
-        Action(kind="policy", name="ask_clarify", args={})
-    ]
+    base_cands = generate_candidates_fn(state, plan) or [Action(kind="policy", name="ask_clarify", args={})]
+    sequences = _default_seq_generator(state, plan, base_cands)
 
-    # تولید دنباله‌ها (می‌توانید ژنراتور اختصاصی خودتان را این‌جا جایگزین کنید)
-    seqs = _default_seq_generator(state, plan, base_cands)
-
-    # Beam انتخابی (برای لیست‌های خیلی بزرگ)
-    if beam > 0 and len(seqs) > beam:
-        seqs = seqs[:beam] + sorted(seqs[beam:], key=lambda seq: -len(seq))[:max(0, beam//2)]
+    # Simple beam pruning on sequence count (heuristic only)
+    if beam > 0 and len(sequences) > beam:
+        sequences = sequences[:beam]
 
     scored: List[Tuple[float, List[Dict[str, Any]], List[Action]]] = []
-    for seq in seqs:
-        seq2 = seq[:max(1, min(len(seq), depth))]
-        tot, dets, _ = _rollout_sequence(
-            state, seq2, predict_fn, r_ext=r_ext, spec=spec, energy_costs=energy_costs, gamma=gamma
+    for seq in sequences:
+        seq_limited = seq[: max(1, min(len(seq), depth))]
+        total, dets, _ = _rollout_sequence(
+            state, seq_limited, predict_fn, r_ext=r_ext, spec=spec, energy_costs=energy_costs, gamma=gamma
         )
-        scored.append((tot, dets, seq2))
+        scored.append((total, dets, seq_limited))
 
     if not scored:
         a = Action(kind="policy", name="ask_clarify", args={})
         return a, {"note": "no sequences", "chosen": [{"action": a.name, "score": 0.0}]}
 
-    # مرتب‌سازی بر اساس امتیاز کل
     scored.sort(key=lambda t: t[0], reverse=True)
     best_total, best_details, best_seq = scored[0]
     best_action = best_seq[0]
 
     rationale = {
         "best_total": float(best_total),
-        "best_seq": [{"name": d["action"]["name"], "score": d["shaped"], "step": d["step"]} for d in best_details],
+        "best_seq": [
+            {"name": d["action"]["name"], "score": float(d["shaped"]), "step": int(d["step"])}
+            for d in best_details
+        ],
         "alternatives": [
-            {
-                "total": float(tot),
-                "seq": [d["action"]["name"] for d in dets]
-            }
+            {"total": float(tot), "seq": [d["action"]["name"] for d in dets]}
             for tot, dets, _ in scored[1:4]
         ],
         "intent": plan.get("intent", "unknown"),
+        "depth_used": len(best_seq),
     }
     return best_action, rationale
 
-# ----------------------------- تست سریع -----------------------------
-
 if __name__ == "__main__":
-    # حالت و پیش‌بینی ساختگی
+    # quick self-test with fake predictors/generators
     s0 = State(s=[0.1]*8, u=0.2, conf=0.8)
 
     def fake_predict(s: State, a: Action):
@@ -202,25 +200,14 @@ if __name__ == "__main__":
         s1 = State(s=s.s, u=u, conf=max(0.0, 1.0-u))
         return s1, Latent(z=s.s), rhat, risk, u
 
-    def gen_cands(state: State, plan: Dict[str, Any]) -> List[Action]:
-        intent = plan.get("intent", "unknown")
-        if intent == "greeting":
+    def gen_cands(st: State, plan: Dict[str, Any]) -> List[Action]:
+        it = plan.get("intent", "unknown")
+        if it == "greeting":
             return [Action(kind="skill", name="reply_greeting", args={})]
-        if intent == "compute":
+        if it == "compute":
             return [Action(kind="tool", name="invoke_calc", args={"expr": "2+2"})]
-        return [
-            Action(kind="policy", name="ask_clarify", args={}),
-            Action(kind="skill",  name="reply_greeting", args={}),
-        ]
+        return [Action(kind="policy", name="ask_clarify", args={}), Action(kind="skill", name="reply_greeting", args={})]
 
-    # سناریو ۱: greet
-    a1, why1 = plan_and_decide(s0, {"intent":"greeting"}, gen_cands, fake_predict)
-    print("best for greeting:", a1, "| rationale:", why1)
-
-    # سناریو ۲: compute
-    a2, why2 = plan_and_decide(s0, {"intent":"compute"}, gen_cands, fake_predict)
-    print("best for compute:", a2, "| rationale:", why2)
-
-    # سناریو ۳: unknown
-    a3, why3 = plan_and_decide(s0, {"intent":"unknown"}, gen_cands, fake_predict)
-    print("best for unknown:", a3, "| rationale:", why3)
+    for it in ["greeting", "compute", "unknown"]:
+        a, why = plan_and_decide(s0, {"intent": it}, gen_cands, fake_predict)
+        print(f"[{it}] ->", a, "|", why)

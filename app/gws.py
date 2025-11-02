@@ -1,35 +1,49 @@
 # -*- coding: utf-8 -*-
 """
-NOEMA • app/gws.py — فضای کار جهانی (Global Workspace) مینیمال برای V0
-- هدف: یک لایه‌ی سبک برای هماهنگی توجه، بودجه، خواب و جذب رویدادهای مربی.
-- وابستگی خارجی ندارد (فقط stdlib). می‌تواند بعداً به main.py وصل شود.
-"""
-from __future__ import annotations
-from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple
-from pathlib import Path
-import time, json, math, os
+NOEMA • app/gws.py — Minimal Global Workspace (V0)
 
-# مسیر پیش‌فرض رویدادهای مربی
+Purpose:
+  A lightweight coordination layer for attention, per-step budget, micro-sleep
+  scheduling, and ingestion of teacher events. Pure-stdlib, can be plugged into
+  main.py later.
+
+Key features:
+  - Salience estimation from (intent, text)
+  - Mode selection: "normal" | "clarify-first" | "budget-tight" | "sleep-soon"
+  - Per-step compute budget heuristic
+  - Teacher event ingestion from JSONL with offset tracking
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
+import json
+import time
+
+# Default paths for teacher events and offset
 DEFAULT_EVENTS_PATH = Path("logs/teacher_events.jsonl")
 DEFAULT_OFFSET_PATH = Path("logs/.teacher_events.offset")
 
+
 @dataclass
 class Focus:
-    """خلاصه‌ی وضعیتِ «روی چه چیزی تمرکز کنیم» در این گام."""
-    salience: float                  # 0..1
-    mode: str                        # "normal" | "clarify-first" | "budget-tight" | "sleep-soon"
-    intent: str                      # intent فعلی (برای اطلاع سایر بلوک‌ها)
-    budget_ms: int                   # بودجه‌ی تقریبی این گام
+    """What to focus on for this step."""
+    salience: float                     # 0..1
+    mode: str                           # "normal" | "clarify-first" | "budget-tight" | "sleep-soon"
+    intent: str                         # current plan intent (for other blocks)
+    budget_ms: int                      # approximate per-step budget
     notes: Dict[str, Any] = field(default_factory=dict)
+
 
 class GlobalWorkspace:
     """
-    GWS مینیمال:
-      - محاسبه‌ی salience از روی intent/متن
-      - تصمیمِ حالت (clarify/budget-tight/sleep) با قواعد ساده
-      - بودجه‌ی محاسبه‌ی یک گام
-      - ingest رویدادهای مربی (از JSONL) با نگه‌داشت offset
+    Minimal GWS:
+      - salience estimation from intent/text
+      - simple mode selection rules (clarify/budget-tight/sleep)
+      - per-step budget estimation
+      - ingest teacher events (JSONL) with offset retention
     """
 
     def __init__(
@@ -41,16 +55,18 @@ class GlobalWorkspace:
         self.events_path = Path(events_path)
         self.offset_path = Path(offset_path)
         self.cfg = {
-            "base_budget_ms": 400,        # بودجه‌ی پیش‌فرض برای هر گام
-            "extra_for_compute_ms": 300,  # اگر intent=compute
-            "sleep_every_steps": 25,      # هر چند گام یک بار micro-nap
-            "sleep_min_interval_s": 60,   # حداقل فاصله‌ی زمانی بین دو خواب
+            "base_budget_ms": 400,        # default per-step budget
+            "extra_for_compute_ms": 300,  # if intent == "compute"
+            "sleep_every_steps": 25,      # micro-nap cadence
+            "sleep_min_interval_s": 60,   # min seconds between naps
             "salience_unknown": 0.85,
             "salience_compute": 0.65,
             "salience_greeting": 0.25,
-            "salience_question_bonus": 0.1,
-            "u_hi": 0.5,                  # آستانه‌ی عدم‌قطعیت برای clarify-first
-            "risk_hi": 0.05,              # اگر ریسک بیشتر از این بود: budget-tight
+            "salience_question_bonus": 0.10,
+            "u_hi": 0.5,                  # uncertainty threshold for clarify-first
+            "risk_hi": 0.05,              # if risk above → budget-tight
+            "novelty_bonus": 0.15,        # bonus when intent changes vs last turn
+            "intent_hist_keep": 5,        # how many past intents to retain
         }
         if config:
             self.cfg.update(config)
@@ -59,13 +75,14 @@ class GlobalWorkspace:
         self._last_sleep_ts = 0.0
         self._intent_hist: List[str] = []
         self._last_offset = self._load_offset()
-        self._events_buffer: List[Dict[str, Any]] = []   # آخرین رویدادهای خوانده‌شده
+        self._events_buffer: List[Dict[str, Any]] = []  # latest ingested events
 
-    # ---------- ابزارهای داخلی ----------
+    # ---------------- Internal helpers ----------------
+
     def _load_offset(self) -> int:
         try:
             if self.offset_path.exists():
-                return int(self.offset_path.read_text().strip() or "0")
+                return int(self.offset_path.read_text(encoding="utf-8").strip() or "0")
         except Exception:
             pass
         return 0
@@ -73,56 +90,63 @@ class GlobalWorkspace:
     def _save_offset(self, n: int) -> None:
         try:
             self.offset_path.parent.mkdir(parents=True, exist_ok=True)
-            self.offset_path.write_text(str(n))
+            tmp = self.offset_path.with_suffix(self.offset_path.suffix + ".tmp")
+            tmp.write_text(str(n), encoding="utf-8")
+            tmp.replace(self.offset_path)
         except Exception:
+            # best-effort; ignore persistence issues
             pass
 
-    # ---------- برآورد سالینس ----------
-    def _salience_of(self, text: str, intent: str) -> float:
-        s = 0.0
-        if intent == "unknown":
-            s = self.cfg["salience_unknown"]
-        elif intent == "compute":
-            s = self.cfg["salience_compute"]
-        elif intent == "greeting":
-            s = self.cfg["salience_greeting"]
-        else:
-            s = 0.5
-        # اگر علامت سؤال دارد، اندکی مهم‌ترش کن
-        if "؟" in text or "?" in text:
-            s = min(1.0, s + self.cfg["salience_question_bonus"])
-        # کمی novelty نسبت به ۵ intent آخر
-        novelty = 0.15 if (not self._intent_hist or intent != self._intent_hist[-1]) else 0.0
-        return max(0.0, min(1.0, s + novelty))
+    # ---------------- Salience ----------------
 
-    # ---------- تصمیم حالت / بودجه ----------
+    def _salience_of(self, text: str, intent: str) -> float:
+        s = 0.5
+        if intent == "unknown":
+            s = float(self.cfg["salience_unknown"])
+        elif intent == "compute":
+            s = float(self.cfg["salience_compute"])
+        elif intent == "greeting":
+            s = float(self.cfg["salience_greeting"])
+
+        # Slightly boost questions (both ASCII '?' and Arabic '؟')
+        if ("?" in text) or ("\u061F" in text):
+            s = min(1.0, s + float(self.cfg["salience_question_bonus"]))
+
+        # Novelty vs the last intent
+        novelty = float(self.cfg["novelty_bonus"]) if (not self._intent_hist or intent != self._intent_hist[-1]) else 0.0
+        s = max(0.0, min(1.0, s + novelty))
+        return s
+
+    # ---------------- Mode & budget ----------------
+
     def _decide_mode_and_budget(self, intent: str, u_mean: float, risk: float) -> Tuple[str, int]:
-        # clarify اگر عدم‌قطعیت بالاست
-        if u_mean >= self.cfg["u_hi"]:
+        # High uncertainty → clarify-first with a smaller budget
+        if u_mean >= float(self.cfg["u_hi"]):
             return "clarify-first", int(self.cfg["base_budget_ms"] * 0.6)
 
-        # اگر ریسک بالا رفت، بودجه را کوچک و محافظه‌کارانه کن
-        if risk > self.cfg["risk_hi"]:
+        # Elevated risk → tighten budget
+        if risk > float(self.cfg["risk_hi"]):
             return "budget-tight", int(self.cfg["base_budget_ms"] * 0.5)
 
-        # intent محاسبه → کمی بودجه‌ی بیشتر
-        budget = self.cfg["base_budget_ms"]
+        # Compute intent → allocate extra budget
+        budget = int(self.cfg["base_budget_ms"])
         if intent == "compute":
-            budget += self.cfg["extra_for_compute_ms"]
+            budget += int(self.cfg["extra_for_compute_ms"])
 
-        # اگر وقت خواب نزدیک است، اطلاع بده
+        # If a micro-nap is due soon, surface that
         if self._sleep_due(soft_check=True):
             return "sleep-soon", budget
 
         return "normal", budget
 
     def _sleep_due(self, soft_check: bool = False) -> bool:
-        # شرایط: تعداد گام‌ها + فاصله‌ی زمانی از آخرین خواب
-        too_many_steps = (self._turn % self.cfg["sleep_every_steps"] == 0 and self._turn != 0)
-        enough_time = (time.time() - self._last_sleep_ts) >= self.cfg["sleep_min_interval_s"]
-        return (too_many_steps and enough_time) if soft_check else (enough_time and too_many_steps)
+        # Conditions: step cadence + time since last sleep
+        steps_due = (self._turn % int(self.cfg["sleep_every_steps"]) == 0 and self._turn != 0)
+        time_ok = (time.time() - self._last_sleep_ts) >= float(self.cfg["sleep_min_interval_s"])
+        return (steps_due and time_ok) if soft_check else (time_ok and steps_due)
 
-    # ---------- API عمومی ----------
+    # ---------------- Public API ----------------
+
     def tick(
         self,
         text: str,
@@ -131,22 +155,26 @@ class GlobalWorkspace:
         model_signals: Optional[Dict[str, float]] = None,
     ) -> Focus:
         """
-        ورودی‌ها:
-          - text: متن خام کاربر
-          - intent: نیت تشخیص‌داده‌شده
-          - self_state: مثلاً {"energy":..,"fatigue":..,"ece":..}
-          - model_signals: مثلاً {"u_mean":..,"risk":..}
-        خروجی: Focus (salience, mode, budget, notes)
+        Advance one step and return a Focus suggestion.
+
+        Args:
+            text: raw user text for salience heuristics
+            intent: current plan intent (e.g., "compute", "greeting", "smalltalk", "unknown")
+            self_state: optional agent state (e.g., {"energy":..., "fatigue":...})
+            model_signals: optional model metrics, e.g., {"u_mean":..., "risk":...}
+
+        Returns:
+            Focus dataclass bundle.
         """
         self._turn += 1
         self._intent_hist.append(intent)
-        self._intent_hist = self._intent_hist[-5:]
+        self._intent_hist = self._intent_hist[-int(self.cfg["intent_hist_keep"]):]
 
         u_mean = float((model_signals or {}).get("u_mean", 0.2))
-        risk   = float((model_signals or {}).get("risk", 0.0))
+        risk = float((model_signals or {}).get("risk", 0.0))
 
-        sal = self._salience_of(text, intent)
-        mode, budget = self._decide_mode_and_budget(intent, u_mean, risk)
+        sal = self._salience_of(text or "", intent or "unknown")
+        mode, budget = self._decide_mode_and_budget(intent or "unknown", u_mean, risk)
 
         notes: Dict[str, Any] = {
             "turn": self._turn,
@@ -157,36 +185,40 @@ class GlobalWorkspace:
         return Focus(salience=sal, mode=mode, intent=intent, budget_ms=budget, notes=notes)
 
     def should_sleep_now(self) -> bool:
-        """برای main: بررسی نهاییِ شروع خواب."""
+        """Final check for main: whether to start a nap now."""
         return self._sleep_due(soft_check=False)
 
     def mark_slept(self) -> None:
-        """بعد از اجرای خواب صدا بزنید."""
+        """Call after a nap to reset the internal timer."""
         self._last_sleep_ts = time.time()
 
-    # ---------- ingest رویدادهای مربی ----------
+    # ---------------- Teacher events ingestion ----------------
+
     def read_new_teacher_events(self) -> List[Dict[str, Any]]:
         """
-        JSONL را از offset قبلی می‌خواند و فقط رکوردهای جدید را برمی‌گرداند.
-        اگر فایل وجود نداشت، خروجی لیست خالی است.
+        Read JSONL from the last offset and return only new records.
+        Handles file truncation/rotation by resetting the offset.
         """
         if not self.events_path.exists():
             self._events_buffer = []
             return []
 
         size = self.events_path.stat().st_size
-        offset = min(self._last_offset, size)
-        new_events: List[Dict[str, Any]] = []
+        # If file shrank (rotation/truncation), reset offset
+        if self._last_offset > size:
+            self._last_offset = 0
 
+        new_events: List[Dict[str, Any]] = []
         with self.events_path.open("r", encoding="utf-8") as f:
-            f.seek(offset)
+            f.seek(self._last_offset)
             for line in f:
                 line = line.strip()
                 if not line:
                     continue
                 try:
                     ev = json.loads(line)
-                    new_events.append(ev)
+                    if isinstance(ev, dict):
+                        new_events.append(ev)
                 except Exception:
                     continue
             self._last_offset = f.tell()
@@ -197,13 +229,13 @@ class GlobalWorkspace:
 
     def summarize_events(self, events: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
         """
-        خلاصه‌ی سریع رویدادهای تازه: شمارش هر نوع، آخرین RULE/TEST.
+        Quick summary: counts by type, last RULE and last TEST.
         """
         events = events if events is not None else self._events_buffer
         counts: Dict[str, int] = {}
         last_rule, last_test = None, None
         for ev in events:
-            t = ev.get("type", "UNKNOWN")
+            t = str(ev.get("type", "UNKNOWN")).upper()
             counts[t] = counts.get(t, 0) + 1
             if t == "RULE":
                 last_rule = ev
@@ -216,20 +248,19 @@ class GlobalWorkspace:
             "n_events": len(events),
         }
 
-# ---------- استفاده‌ی نمونه (اجرای مستقیم) ----------
+
+# ---------------- Demo usage ----------------
 if __name__ == "__main__":
     gws = GlobalWorkspace()
-    # شبیه‌سازی چند ورودی
     samples = [
-        ("سلام!", "greeting", {"u_mean": 0.1, "risk": 0.0}),
-        ("۲+۲؟", "compute", {"u_mean": 0.2, "risk": 0.0}),
-        ("لیست را درست کن", "unknown", {"u_mean": 0.7, "risk": 0.0}),
+        ("hello!", "greeting", {"u_mean": 0.1, "risk": 0.0}),
+        ("2+2?", "compute", {"u_mean": 0.2, "risk": 0.0}),
+        ("fix the list", "unknown", {"u_mean": 0.7, "risk": 0.0}),
     ]
     for text, intent, sig in samples:
         f = gws.tick(text, intent, model_signals=sig)
         print(f"[{intent}] salience={f.salience:.2f} mode={f.mode} budget={f.budget_ms}ms notes={f.notes}")
 
-    # خواندن رویدادهای مربی (اگر باشد)
     evs = gws.read_new_teacher_events()
     summary = gws.summarize_events(evs)
     print("Teacher events summary:", json.dumps(summary, ensure_ascii=False, indent=2))
